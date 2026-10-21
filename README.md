@@ -1,8 +1,10 @@
-<img src=".claude-plugin/icon.png" alt="my-pr-links icon: three pull request rows with green, amber and red status dots on one branch line that flows into the prompt" width="96" align="right">
+<p align="center">
+  <img src=".claude-plugin/icon.png" alt="my-pr-links icon: three pull request rows with green, amber and red status dots on one branch line that flows into the prompt" width="128">
+</p>
 
-# my-pr-links
+<h1 align="center">my-pr-links</h1>
 
-A Claude Code mod that shows the pull requests of your session in a band above the prompt, with their state, CI, approvals and the next action.
+<p align="center">A Claude Code mod that shows the pull requests of your session in a band above the prompt, with their state, CI, approvals and the next action.</p>
 
 ![The my-pr-links band above the Claude Code prompt. Three ticket groups from apache/kafka (KAFKA-21269 with a failed CI run, KAFKA-21181 with two PRs ready to merge, KAFKA-21309 with a draft) and an "other" group with two cli/cli PRs. Each header shows the ticket key, a title from the title command and the next action, such as "fix CI #23859" or "you merge #23885".](docs/images/band.png)
 
