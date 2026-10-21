@@ -43,16 +43,16 @@ Third-party marketplaces do not auto-update by default. Turn it on in `/plugin` 
 
 ## Usage
 
-| Command                   | Effect                                                    |
-| ------------------------- | --------------------------------------------------------- |
-| `/my-pr-links`            | Hide the band, or show it again                           |
-| `/my-pr-links list`       | Print every PR of the last fetch, with links              |
-| `/my-pr-links refresh`    | Fetch now                                                 |
-| `/my-pr-links open <ref>` | Open one PR: `42`, `!42`, `#88`                        |
-| `/my-pr-links open <ref> ci` | Open the CI page of one PR: the pipeline or a check    |
-| `/my-pr-links add <url>`  | Add a PR or MR that the session did not create or update  |
+| Command                      | Effect                                                   |
+| ---------------------------- | -------------------------------------------------------- |
+| `/my-pr-links`               | Hide the band, or show it again                          |
+| `/my-pr-links list`          | Print every PR of the last fetch, with links             |
+| `/my-pr-links refresh`       | Fetch now                                                |
+| `/my-pr-links open <ref>`    | Open one PR: `42`, `!42`, `#88`                          |
+| `/my-pr-links open <ref> ci` | Open the CI page of one PR: the pipeline or a check      |
+| `/my-pr-links add <url>`     | Add a PR or MR that the session did not create or update |
 
-The band fetches again when a tool call creates or updates a PR. It also fetches every 3 minutes, or every minute while a PR has CI running or is ready to merge.
+The band fetches again when a tool call creates or updates a PR. It also refreshes every minute while a PR has CI running or is ready to merge, and every 3 minutes otherwise.
 
 A toast says when a PR merges, closes, fails CI or becomes ready to merge, once per change. A new CI run can announce its result again.
 

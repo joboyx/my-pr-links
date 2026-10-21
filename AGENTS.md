@@ -5,18 +5,18 @@ The plugin lives at the repo root. User docs are in `README.md`.
 
 ## Layout
 
-| Path                              | Content                                                                              |
-| --------------------------------- | ------------------------------------------------------------------------------------ |
-| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, listing fields, `userConfig`                       |
-| `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`                            |
-| `.claude-plugin/types/`           | Mod API types that Claude Code generates; git-ignored (see below)                    |
-| `hooks/hooks.json`                | Hook module list                                                                     |
-| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open                         |
+| Path                              | Content                                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, listing fields, `userConfig`                                      |
+| `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`                                           |
+| `.claude-plugin/types/`           | Mod API types that Claude Code generates; git-ignored (see below)                                   |
+| `hooks/hooks.json`                | Hook module list                                                                                    |
+| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open                                        |
 | `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, change toasts, `$BROWSER` argv |
-| `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output                            |
-| `hooks/*.test.ts`                 | Unit tests                                                                           |
-| `types/index.d.ts`                | Types of the plugin's own state (`PluginState`)                                      |
-| `.agents/skills/`                 | Repo skills `verify` and `release` (`.claude/skills` links here)                     |
+| `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output                                           |
+| `hooks/*.test.ts`                 | Unit tests                                                                                          |
+| `types/index.d.ts`                | Types of the plugin's own state (`PluginState`)                                                     |
+| `.agents/skills/`                 | Repo skills `verify` and `release` (`.claude/skills` links here)                                    |
 
 Claude Code writes `.claude-plugin/types/` beside the mod when it loads the mod from this folder, and writes it again after a Claude Code update. The folder's own `.gitignore` keeps it out of git. The first line of `claude-code/index.d.ts` names the Claude Code version that wrote it. A fresh clone gets the folder on the first load, such as `claude --plugin-dir .`. Do not edit it.
 
