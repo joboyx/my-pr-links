@@ -94,11 +94,17 @@ The band shows the short repo name (`cli`, `kafka`). Command replies stay on scr
 
 `wait_for` patterns are extended regular expressions (`grep -E`): `+` means one or more, so `#14767 +cli ` matches the ref, one or more spaces, then `cli`.
 
+The `list` output also holds the ref and the repo (`✔ #14767 cli — Bump…`). Where `list` ran earlier, match the band row only: two or more spaces and no em dash, such as `#14767 +cli +Bump`.
+
+`snap` and `wait_for` read the visible screen, which is right for band checks. A reply can scroll off. Read reply text (`Added #…`, `PR band hidden.`) from the scrollback: `tmux capture-pane -p -S -200 -t "$A"`.
+
+To change an env var of the session, pass it to `start` as an extra assignment. It comes after `BROWSER='$OUT/bin/browser'` in the `env` call, so the later assignment wins: `start "$C" "BROWSER=no-such-browser-xyz"`.
+
 Between two `add` commands, wait up to 4 s for the reply to the first one: `wait_for <session> 'Added #<n>' 4`.
 
 ## Scenarios
 
-Session A runs with no title command. Session B runs with the title command stub.
+Session A runs with no title command. Session B runs with the title command stub. Session C runs with a `BROWSER` that does not exist.
 
 ```sh
 . "<OUT>/lib.sh"; A=prl-a-<timestamp>
@@ -114,17 +120,18 @@ ready "$A"; snap "$A" 00-start
 | 4  | List                         | `send "$A" '/my-pr-links list'`; `snap "$A" 04-list`                                                           | Output names `#14767` and `#14722` with their state                                               |
 | 5  | Refresh                      | `send "$A" '/my-pr-links refresh'`; `wait_for "$A" '2 PRs from this session'`; `snap "$A" 05-refresh`         | Reply `2 PRs from this session`; the band shows `just now`                                        |
 | 6  | Open via `$BROWSER`          | `send "$A" '/my-pr-links open #14767'`; `wait_for "$A" 'Opened'`; `snap "$A" 06-open`; `cat "$OUT/opened.txt"` | `opened.txt` holds `https://github.com/cli/cli/pull/14767`; reply starts `Opened cli #14767`; no browser window opens |
-| 7  | Hide                         | `send "$A" '/my-pr-links'`; `wait_for "$A" 'PR band hidden'`; `snap "$A" 07-hide`                              | Reply `PR band hidden.`; no `#14767 +cli ` row above the prompt                                   |
-| 8  | Show                         | `send "$A" '/my-pr-links'`; `wait_for "$A" '#14767 +cli '`; `snap "$A" 08-show`                                | Reply `PR band shown above the prompt.`; the rows are back                                        |
+| 7  | Hide                         | `send "$A" '/my-pr-links'`; `wait_for "$A" 'PR band hidden'`; `sleep 2`; `snap "$A" 07-hide`                  | Reply `PR band hidden.` (read it from the scrollback); `grep -E '#14767 +cli +Bump' 07-hide.txt` finds nothing. The `list` output (`✔ #14767 cli — Bump…`) does not match that pattern |
+| 8  | Show                         | `send "$A" '/my-pr-links'`; `wait_for "$A" '#14767 +cli +Bump'`; `snap "$A" 08-show`                           | Reply `PR band shown above the prompt.` (read it from the scrollback); the band rows are back (`#14767 +cli +Bump` matches) |
 | 9  | Groups, title command off    | `send` `add` for `apache/kafka/pull/23862`; `wait_for "$A" 'Added #23862' 4`; `send` `add` for `apache/kafka/pull/23867`; `wait_for "$A" '#23867 +kafka ' 60`; `snap "$A" 09-groups-no-title` | Header lines `KAFKA-21305` and `KAFKA-21307` with no title text; the `cli` rows sit under `other`; `title-calls.txt` does not exist |
-| 10 | Title command on             | `B=prl-b-<timestamp>`; `start "$B" "MY_PR_LINKS_TASK_TITLE_CMD='$OUT/bin/title'"`; `ready "$B"`; `send` `add` for `apache/kafka/pull/23862`; `wait_for "$B" 'Added #23862' 4`; `send` `add` for `cli/cli/pull/14767`; `wait_for "$B" 'Verify title for KAFKA-21305' 60`; `wait_for "$B" '#14767 +cli ' 60` (the title shows before the second fetch ends); `snap "$B" 10-title-on` | Header `KAFKA-21305` then `Verify title for KAFKA-21305`; `title-calls.txt` holds `KAFKA-21305`; the `cli` row sits under `other` |
+| 10 | Title command on             | `B=prl-b-<timestamp>`; `start "$B" "MY_PR_LINKS_TASK_TITLE_CMD='$OUT/bin/title'"`; `ready "$B"`; `send` `add` for `apache/kafka/pull/23862`; `wait_for "$B" 'Added #23862' 4`; `send` `add` for `cli/cli/pull/14767`; `wait_for "$B" 'Verify title for KAFKA-21305' 60`; `wait_for "$B" '#14767 +cli ' 60` (the title shows before the second fetch ends); `snap "$B" 10-title-on` | Header `KAFKA-21305` then `Verify title for KAFKA-21305`; `title-calls.txt` holds `KAFKA-21305` (the command runs once per ticket key per fetch, so the key can appear more than once); the `cli` row sits under `other` |
+| 11 | Bad BROWSER                  | `C=prl-c-<timestamp>`; `start "$C" "BROWSER=no-such-browser-xyz"`; `ready "$C"`; `send` `add` for `cli/cli/pull/14767`; `wait_for "$C" 'Added #14767' 30`; `send "$C" '/my-pr-links open 14767'`; `wait_for "$C" 'Opened|could not open' 30`; `snap "$C" 11-bad-browser` | Reply is `Opened … ` (platform fallback) or `could not open … : <reason>`; the prompt returns and the session does not hang. On WSL the fallback opens a real browser tab once |
 
 For each scenario, compare the capture with the pass rule. On a fail, keep the capture, take one more capture after 10 s (a fetch can be slow), and record both.
 
 ## Cleanup
 
 ```sh
-tmux kill-session -t "$A"; tmux kill-session -t "$B"
+tmux kill-session -t "$A"; tmux kill-session -t "$B"; tmux kill-session -t "$C"
 tmux ls 2>/dev/null | grep prl- || echo "no verify sessions left"
 ```
 
@@ -146,5 +153,6 @@ End with this table. Give the proof file as the full path under `$OUT`.
 | 8 | Show                      | pass/fail | `$OUT/08-show.txt`           |
 | 9 | Groups, title command off | pass/fail | `$OUT/09-groups-no-title.txt` |
 | 10 | Title command on         | pass/fail | `$OUT/10-title-on.txt`, `$OUT/title-calls.txt` |
+| 11 | Bad BROWSER              | pass/fail | `$OUT/11-bad-browser.txt`    |
 
 Under the table, quote the band lines from the capture of each failed scenario.
