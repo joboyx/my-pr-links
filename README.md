@@ -1,3 +1,5 @@
+<img src=".claude-plugin/icon.png" alt="my-pr-links icon: three pull request rows with green, amber and red status dots on one branch line that flows into the prompt" width="96" align="right">
+
 # my-pr-links
 
 A Claude Code mod that shows the pull requests of your session in a band above the prompt, with their state, CI, approvals and the next action.

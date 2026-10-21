@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1c2140"/>
+      <stop offset="1" stop-color="#0b0d17"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.22" cy="0.2" r="0.7">
+      <stop offset="0" stop-color="#d97757" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#d97757" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="bar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2b3156"/>
+      <stop offset="1" stop-color="#20253f"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <rect width="1024" height="1024" fill="url(#glow)"/>
+
+  <!-- git graph: the status dots of the band rows are commits on one branch -->
+  <path d="M196 236 V 586" stroke="#59628f" stroke-width="16" stroke-linecap="round" fill="none"/>
+  <path d="M196 586 C 196 690, 300 690, 330 760" stroke="#59628f" stroke-width="16" stroke-linecap="round" fill="none"/>
+
+  <!-- row 1: merged / ready -->
+  <rect x="290" y="176" width="620" height="120" rx="60" fill="url(#bar)"/>
+  <rect x="340" y="222" width="96" height="28" rx="14" fill="#58a6ff"/>
+  <rect x="462" y="222" width="250" height="28" rx="14" fill="#aab2d9"/>
+  <path d="M786 238 l 26 26 l 50 -54" stroke="#3fb950" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="196" cy="236" r="50" fill="#3fb950"/>
+  <circle cx="196" cy="236" r="22" fill="#0f2416"/>
+
+  <!-- row 2: CI running -->
+  <rect x="290" y="351" width="620" height="120" rx="60" fill="url(#bar)"/>
+  <rect x="340" y="397" width="96" height="28" rx="14" fill="#58a6ff"/>
+  <rect x="462" y="397" width="190" height="28" rx="14" fill="#aab2d9"/>
+  <circle cx="824" cy="411" r="30" stroke="#3a4170" stroke-width="16" fill="none"/>
+  <path d="M824 381 A 30 30 0 0 1 854 411" stroke="#e3b341" stroke-width="16" stroke-linecap="round" fill="none"/>
+  <circle cx="196" cy="411" r="50" fill="#e3b341"/>
+  <circle cx="196" cy="411" r="22" fill="#2b2108"/>
+
+  <!-- row 3: CI failed -->
+  <rect x="290" y="526" width="620" height="120" rx="60" fill="url(#bar)"/>
+  <rect x="340" y="572" width="96" height="28" rx="14" fill="#58a6ff"/>
+  <rect x="462" y="572" width="280" height="28" rx="14" fill="#aab2d9"/>
+  <path d="M800 562 l 48 48 M848 562 l -48 48" stroke="#f85149" stroke-width="20" stroke-linecap="round" fill="none"/>
+  <circle cx="196" cy="586" r="50" fill="#f85149"/>
+  <circle cx="196" cy="586" r="22" fill="#2d0e0d"/>
+
+  <!-- the prompt the band sits above -->
+  <path d="M370 742 l 70 52 l -70 52" stroke="#d97757" stroke-width="30" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <rect x="488" y="752" width="64" height="84" rx="10" fill="#d97757" opacity="0.9"/>
+  <rect x="290" y="890" width="620" height="10" rx="5" fill="#59628f" opacity="0.6"/>
+</svg>
