@@ -137,7 +137,8 @@ export type PrLink = {
 };
 
 /**
- * The fields read from `glab api projects/:id/merge_requests/:iid`.
+ * The fields read from `glab api projects/:id/merge_requests/:iid`,
+ * its head pipeline included.
  */
 export type GitlabMrItem = {
   iid: number;
@@ -153,17 +154,9 @@ export type GitlabMrItem = {
   state: string;
   detailed_merge_status?: string;
   has_conflicts?: boolean;
+  head_pipeline?: { status: string } | null;
   web_url: string;
   references: { full: string };
-};
-
-/**
- * The pipeline and merge status fields of the same
- * `glab api projects/:id/merge_requests/:iid` response.
- */
-export type GitlabMrDetail = {
-  head_pipeline?: { status: string } | null;
-  detailed_merge_status?: string;
 };
 
 /**
@@ -252,7 +245,7 @@ export type Next = { kind: 'failing' | 'you' | 'waiting' | 'done'; text: string 
  * Sort rank of a group by its next action: lower sorts first, so what needs
  * attention leads.
  */
-export const URGENCY: Record<Next['kind'], number> = { failing: 0, you: 1, waiting: 2, done: 3 };
+const URGENCY: Record<Next['kind'], number> = { failing: 0, you: 1, waiting: 2, done: 3 };
 
 const OTHER = 'other';
 
@@ -295,10 +288,9 @@ const BRANCH_KEY = new RegExp(`(?:^|/)(${KEY})(?=$|[-_/.])`, 'g');
 const CONVENTIONAL = /^([a-z]+)(?:\(([^)]*)\))?(!)?:\s*(.*)$/;
 // Rule 3: a ticket key that opens the description, `SHOP-214: x` or `[SHOP-214] x`.
 const LEAD_KEY = new RegExp(`^(?:\\[(${KEY})\\]|(${KEY}):)\\s`);
-// Rule 4: a footer or git trailer line, such as `Refs: SHOP-214` or `Closes #SHOP-214`. The key
-// ends the line or a list item (`Closes ABC-1, ABC-2`), so `Fixes UTF-8 decoding` never matches.
-const TRAILER_KEY =
-  /^(?:refs?|closes|fixes|resolves|issue|ticket|task|jira)[ \t]*[:#]?[ \t]*([A-Za-z][A-Za-z0-9]*-\d+)(?=[ \t]*(?:\r?$|[,;]))/gim;
+// Rule 4: a footer or git trailer line, such as `Refs: SHOP-214` or `Closes #SHOP-214`: a whole
+// keyword, an optional `:`, then the rest of the line as a `,`/`;` list (see `trailerKeyOf`).
+const TRAILER_LINE = /^(?:refs?|closes|fixes|resolves|issue|ticket|task|jira)\b[ \t]*:?(.*)$/gim;
 const ROW_TITLE_MAX = 50;
 
 /**
@@ -379,11 +371,23 @@ export function ticketOf(sourceBranch: string, title: string, body = ''): string
   const fromLead = leadKeyOf(parsed.desc)?.key;
   if (fromLead && isKey(fromLead)) return fromLead;
   // The trailer keyword matches in any case; the key itself only in capitals.
-  for (const m of body.matchAll(TRAILER_KEY)) {
-    const key = m[1];
-    if (key && isKey(key)) return key;
+  for (const m of body.matchAll(TRAILER_LINE)) {
+    const key = trailerKeyOf(m[1] ?? '');
+    if (key) return key;
   }
   return undefined;
+}
+
+/**
+ * The first item of a trailer's `,`/`;` list that is a whole key, less a
+ * leading `#` and a trailing `.` (`#12, ABC-2.` gives `ABC-2`); `undefined`
+ * when no item is a key, such as `ABC-123 later`.
+ */
+function trailerKeyOf(list: string): string | undefined {
+  return list
+    .split(/[,;]/)
+    .map((item) => item.trim().replace(/^#/, '').replace(/\.$/, ''))
+    .find(isKey);
 }
 
 /**
@@ -445,16 +449,12 @@ function gitlabApprovals(approvals: GitlabMrApprovals | undefined): string | und
 }
 
 /**
- * Maps one GitLab MR, plus its pipeline detail (the same single-MR response)
- * and approvals when fetched, to an `Pr`.
+ * Maps one GitLab MR, with its head pipeline, plus its approvals when
+ * fetched, to a `Pr`.
  */
-export function fromGitlab(
-  item: GitlabMrItem,
-  detail?: GitlabMrDetail,
-  approvals?: GitlabMrApprovals,
-): Pr {
-  const mergeStatus = detail?.detailed_merge_status ?? item.detailed_merge_status;
-  const ci = gitlabCi(detail?.head_pipeline?.status);
+export function fromGitlab(item: GitlabMrItem, approvals?: GitlabMrApprovals): Pr {
+  const mergeStatus = item.detailed_merge_status;
+  const ci = gitlabCi(item.head_pipeline?.status);
   const approvalsMissing = (approvals?.approvals_left ?? 0) > 0;
   const state: PrState =
     item.state === 'merged'
@@ -525,7 +525,7 @@ function githubCi(checks: GithubCheck[]): CiStatus | undefined {
 }
 
 /**
- * Maps one `gh pr view` result to an `Pr`; the repo name comes from its URL.
+ * Maps one `gh pr view` result to a `Pr`; the repo name comes from its URL.
  */
 export function fromGithub(view: GithubPrView): Pr {
   const prState = view.state.toUpperCase();

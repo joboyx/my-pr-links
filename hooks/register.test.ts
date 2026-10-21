@@ -12,8 +12,7 @@ import {
   GITLAB_MR_42,
   SESSION_CREATE_CALLS,
 } from './fixtures';
-import type { GitlabMr } from './fixtures';
-import type { GithubPrView } from './prs';
+import type { GithubPrView, GitlabMrItem } from './prs';
 
 const BAND = {
   component: 'AbovePrompt',
@@ -47,7 +46,7 @@ const OPTION_TITLE_CMD = '/opt/bin/option-title';
 /**
  * A finished MR of ticket SHOP-214 in shop-api, based on !41.
  */
-function finishedMr(iid: number, state: string, over: Partial<GitlabMr> = {}): GitlabMr {
+function finishedMr(iid: number, state: string, over: Partial<GitlabMrItem> = {}): GitlabMrItem {
   return {
     ...GITLAB_MR_41,
     iid,
@@ -69,29 +68,33 @@ const CLOSED_7 = finishedMr(7, 'closed', {
 const MERGED_28 = finishedMr(28, 'merged');
 
 /**
- * How the test hosts answer one command: its output, or `'missing'` when its
- * binary cannot start (as a timeout, the call rejects).
+ * How the test hosts answer one command: its output; `'missing'` when its
+ * binary cannot start (the call rejects at once); `'slow'` when it runs past
+ * its timeout (the call rejects then); `'stays'` when it runs on, as a
+ * browser does.
  */
-type Answer = { exitCode?: number; stdout?: string; stderr?: string } | 'missing';
+type Answer = { exitCode?: number; stdout?: string; stderr?: string } | 'missing' | 'slow' | 'stays';
 
 /**
  * Per-command overrides of the default host answers. `gh` answers every
- * `gh pr` call (or, as `'missing'`, every `gh` call); `ghAuth` answers
- * `gh auth status`; `noToken` lists the logins whose `gh auth token` fails;
- * `views` adds `gh pr view` results by URL; `title` answers the title
- * command; `uname` is what `uname -sr` prints (a WSL kernel when unset);
- * `missing` lists the binaries that cannot start; `env` is the environment
- * the plugin reads.
+ * `gh pr` call (or, as `'missing'` or `'slow'`, every `gh` call); `ghAuth`
+ * answers `gh auth status`; `noToken` lists the logins whose
+ * `gh auth token` fails; `views` adds `gh pr view` results by URL; `title`
+ * answers the title command; `uname` is what `uname -sr` prints (a WSL
+ * kernel when unset); `missing` lists the binaries that cannot start;
+ * `tools` answers other binaries by name; `env` is the environment the
+ * plugin reads.
  */
 type Hosts = {
   glab?: Answer;
   gh?: Answer;
   ghAuth?: Answer;
   noToken?: string[];
-  views?: Record<string, GithubPrView>;
+  views?: Record<string, GithubPrView | object>;
   title?: Answer;
   uname?: string;
   missing?: string[];
+  tools?: Record<string, Answer>;
   env?: Record<string, string>;
 };
 
@@ -129,10 +132,12 @@ const failed: Answer = { exitCode: 1, stderr: 'not found\n' };
 function answerOf(argv: readonly string[], hosts: Hosts, env?: Record<string, string>): Answer {
   const [tool, sub, path = ''] = argv;
   if (tool && hosts.missing?.includes(tool)) return 'missing';
+  const own = tool ? hosts.tools?.[tool] : undefined;
+  if (own) return own;
   if (tool === TITLE_CMD) return hosts.title ?? { stdout: 'Checkout retries\nsecond line\n' };
   if (tool === OPTION_TITLE_CMD) return { stdout: 'Checkout retries from the option\n' };
   if (tool === 'glab' && hosts.glab) return hosts.glab;
-  if (tool === 'gh' && hosts.gh === 'missing') return 'missing';
+  if (tool === 'gh' && (hosts.gh === 'missing' || hosts.gh === 'slow')) return hosts.gh;
   if (tool === 'gh' && sub === 'auth' && path === 'status')
     return hosts.ghAuth ?? ok(GH_AUTH_STATUS);
   if (tool === 'gh' && sub === 'auth' && path === 'token') {
@@ -170,13 +175,19 @@ function answerOf(argv: readonly string[], hosts: Hosts, env?: Record<string, st
   }
   if (tool === 'gh') return failed;
   if (tool === 'uname') return { stdout: hosts.uname ?? 'Linux 6.6.0-microsoft-standard-WSL2\n' };
-  return { exitCode: 1 };
+  // explorer.exe exits 1 even when it opened the URL; other openers exit 0.
+  return tool === 'explorer.exe' ? { exitCode: 1 } : {};
 }
 
+// The default timeout of `process.run`.
+const RUN_TIMEOUT_MS = 30000;
+// How long a command that runs on keeps running: past every wait of the plugin.
+const STAYS_MS = 10 * 60 * 1000;
+
 /**
- * Answers `process.run` from the fixtures, `$.env.get` from `hosts.env`, and
- * the clock at `NOW`; returns every argv the plugin ran, each run with its
- * environment and timeout, and the clock.
+ * Answers `process.run` and `process.spawn` from the fixtures, `$.env.get`
+ * from `hosts.env`, and the clock at `NOW`; returns every argv the plugin
+ * ran or started, each run with its environment and timeout, and the clock.
  */
 function hostsFor(on: On, hosts: Hosts = {}): { ran: string[][]; runs: Run[]; clock: MockClock } {
   engineBandFor(on);
@@ -184,11 +195,24 @@ function hostsFor(on: On, hosts: Hosts = {}): { ran: string[][]; runs: Run[]; cl
   const clock = mock.clock(on, { now: NOW });
   const ran: string[][] = [];
   const runs: Run[] = [];
-  on('process.run', ($, e) => {
+  on('process.spawn', async function* ($, e) {
+    ran.push([...e.argv]);
+    runs.push({ argv: [...e.argv], env: e.env });
+    const answer = answerOf(e.argv, hosts, e.env);
+    if (answer === 'missing') return { deny: `${e.argv[0]}: not found` };
+    if (answer === 'slow' || answer === 'stays') await clock.sleep(STAYS_MS);
+    const exitCode = typeof answer === 'object' ? (answer.exitCode ?? 0) : 0;
+    return { value: { code: exitCode, signal: null } };
+  });
+  on('process.run', async ($, e) => {
     ran.push([...e.argv]);
     runs.push({ argv: [...e.argv], env: e.init?.env, timeoutMs: e.init?.timeoutMs });
     const answer = answerOf(e.argv, hosts, e.init?.env);
     if (answer === 'missing') throw new Error(`${e.argv[0]}: not found`);
+    if (answer === 'slow' || answer === 'stays') {
+      await clock.sleep(e.init?.timeoutMs ?? RUN_TIMEOUT_MS);
+      throw new Error(`${e.argv[0]}: timed out`);
+    }
     return {
       value: {
         exitCode: answer.exitCode ?? 0,
@@ -548,7 +572,8 @@ test(
 for (const [name, title] of [
   ['exits non-zero',{ exitCode: 1, stdout: 'Checkout retries\n', stderr: 'no such ticket\n' }],
   ['prints nothing', { stdout: '\n  \n' }],
-  ['times out', 'missing'],
+  ['cannot start', 'missing'],
+  ['times out', 'slow'],
 ] as const) {
   test(`a title command that ${name} leaves the header untitled, with no error`, async ($, on) => {
     const { runs, clock } = hostsFor(on, {
@@ -559,6 +584,8 @@ for (const [name, title] of [
 
     await createShopApiPr($);
     await clock.settle();
+    // The title command may run 2 s.
+    await clock.advance(2000);
 
     expect(titleRunsOf(runs).map((r) => r.argv)).toEqual([[TITLE_CMD, 'SHOP-214']]);
     const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
@@ -634,6 +661,37 @@ test('a CLI whose binary cannot start skips its PR without an error line', async
   expect(await ui.find({ text: /\[!42\]/ })).toBeDefined();
   expect(await ui.find({ text: /#88/ })).toBeUndefined();
   expect(await ui.find({ text: /⚠/ })).toBeUndefined();
+});
+
+test('a CLI call that times out shows an error line that names the CLI', async ($, on) => {
+  const { runs, clock } = hostsFor(on, { gh: 'slow' });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+  // `gh auth status`, then `gh pr view`: each runs to its 30 s timeout.
+  await clock.advance(60000);
+
+  expect(runs.find((r) => r.argv[0] === 'gh')?.timeoutMs).toBe(30000);
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await ui.find({ text: /\[!42\]/ })).toBeDefined();
+  expect(await ui.find({ text: /⚠ gh: timed out after 30 s/ })).toBeDefined();
+});
+
+test('a PR whose JSON has an unexpected shape shows an error line; the other PRs stay', async ($, on) => {
+  const { state: _state, ...broken } = GITHUB_88_VIEW;
+  const { clock } = hostsFor(on, { views: { [PR_88]: broken } });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await ui.find({ text: /\[!42\]/ })).toBeDefined();
+  expect(await ui.find({ text: /\[#88\]/ })).toBeUndefined();
+  expect(await ui.find({ text: /⚠ gh: unexpected JSON for octo-org\/docs#88/ })).toBeDefined();
 });
 
 /**
@@ -870,6 +928,65 @@ test('a $BROWSER that cannot start falls back to the platform opener', async ($,
   ]);
 });
 
+test('a $BROWSER that runs on opens the URL once, with no wait for its exit', async ($, on) => {
+  const { ran, clock } = hostsFor(on, {
+    env: { BROWSER: 'firefox' },
+    tools: { firefox: 'stays' },
+  });
+  toolsFor(on);
+  await createShopApiPr($);
+  await clock.settle();
+
+  const pending = $.command.run({ command: 'my-pr-links', args: 'open !42', ...COMPOSER });
+  await clock.advance(500);
+  const out = await pending;
+
+  expect(out.text).toBe('Opened shop-api !42 in browser');
+  // The browser exits later; nothing opens the URL again.
+  await clock.advance(STAYS_MS);
+  expect(ran.filter((argv) => argv.includes(PR_42))).toEqual([['firefox', PR_42]]);
+});
+
+test('a $BROWSER that exits non-zero reports the failure, with no fallback', async ($, on) => {
+  const { ran, clock } = hostsFor(on, {
+    env: { BROWSER: 'firefox' },
+    tools: { firefox: { exitCode: 3 } },
+  });
+  toolsFor(on);
+  await createShopApiPr($);
+  await clock.settle();
+
+  const out = await $.command.run({ command: 'my-pr-links', args: 'open !42', ...COMPOSER });
+
+  expect(out.text).toBe(`Could not open ${PR_42}: firefox exited 3`);
+  expect(ran.some((argv) => argv[0] === 'uname' || argv[0] === 'explorer.exe')).toBe(false);
+});
+
+test('when $BROWSER and the platform opener both fail, open says why', async ($, on) => {
+  const { clock } = hostsFor(on, {
+    env: { BROWSER: 'firefox' },
+    missing: ['firefox', 'explorer.exe'],
+  });
+  toolsFor(on);
+  const toasts: string[] = [];
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text);
+    return { value: undefined };
+  });
+  await createShopApiPr($);
+  await clock.settle();
+
+  const out = await $.command.run({ command: 'my-pr-links', args: 'open !42', ...COMPOSER });
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  await ui.press({ key: 'link-pr-ticket-SHOP-214-gitlab-shop-api-42', link: { href: PR_42 } });
+  await clock.settle();
+
+  const reason =
+    'my-pr-links: $.process.spawn: firefox: not found; my-pr-links: $.process.spawn: explorer.exe: not found';
+  expect(out.text).toBe(`Could not open ${PR_42}: ${reason}`);
+  expect(toasts).toEqual([`⑂ could not open ${PR_42}: ${reason}`]);
+});
+
 for (const [os, kernel, opener, where] of [
   ['macOS', 'Darwin 23.6.0\n', 'open', 'macOS browser'],
   ['plain Linux', 'Linux 6.8.0-45-generic\n', 'xdg-open', 'browser'],
@@ -959,6 +1076,16 @@ test('/my-pr-links toggles the band', async ($) => {
   expect(shown.text).toContain('shown');
 });
 
+test('an unknown subcommand shows the usage and leaves the band as it was', async ($) => {
+  const out = await $.command.run({ command: 'my-pr-links', args: 'lsit', ...COMPOSER });
+  expect(out.text).toBe(
+    'Unknown subcommand lsit. Usage: /my-pr-links [list | refresh | open <ref> | add <url>]',
+  );
+
+  const hid = await $.command.run({ command: 'my-pr-links', args: '', ...COMPOSER });
+  expect(hid.text).toContain('hidden');
+});
+
 test('/my-pr-links add adds a PR once and rejects a bad argument', async ($, on) => {
   const { ran, clock } = hostsFor(on);
   toolsFor(on);
@@ -1003,7 +1130,7 @@ test('an all-merged ticket still shows each merged PR as a row with its 👍 cou
 test('a mixed ticket gives its merged and closed PRs their own rows, the closed one dim', async ($, on) => {
   const { clock } = hostsFor(on);
   toolsFor(on);
-  const add = (pr: GitlabMr) =>
+  const add = (pr: GitlabMrItem) =>
     $.command.run({ command: 'my-pr-links', args: `add ${pr.web_url}`, ...COMPOSER });
 
   await createShopApiPr($);

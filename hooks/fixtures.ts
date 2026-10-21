@@ -8,15 +8,8 @@ import type {
   GithubPrView,
   GithubReview,
   GitlabMrApprovals,
-  GitlabMrDetail,
   GitlabMrItem,
 } from './prs';
-
-/**
- * One `glab api projects/:id/merge_requests/:iid` response: the PR fields
- * and its head pipeline.
- */
-export type GitlabMr = GitlabMrItem & GitlabMrDetail;
 
 /**
  * One Bash call of a session and the result text the model read.
@@ -26,7 +19,7 @@ export type SessionCall = { command: string; result: string };
 /**
  * `glab api projects/:id/merge_requests/41`: ready to merge, pipeline passed.
  */
-export const GITLAB_MR_41: GitlabMr = {
+export const GITLAB_MR_41: GitlabMrItem = {
   iid: 41,
   title: 'feat(SHOP-214): add retry to the checkout client',
   description: 'Retries a failed checkout call up to 3 times.',
@@ -45,7 +38,7 @@ export const GITLAB_MR_41: GitlabMr = {
  * `glab api projects/:id/merge_requests/42`: stacked on !41, with open
  * threads and no pipeline yet.
  */
-export const GITLAB_MR_42: GitlabMr = {
+export const GITLAB_MR_42: GitlabMrItem = {
   iid: 42,
   title: 'feat(SHOP-214): back off between checkout retries',
   description: null,
@@ -64,7 +57,7 @@ export const GITLAB_MR_42: GitlabMr = {
  * `glab api projects/:id/merge_requests/17`: a draft in another project, on
  * a branch named like !42's.
  */
-export const GITLAB_MR_17: GitlabMr = {
+export const GITLAB_MR_17: GitlabMrItem = {
   iid: 17,
   title: 'Draft: feat(SHOP-214): show a retry notice at checkout',
   description: '',
@@ -81,7 +74,7 @@ export const GITLAB_MR_17: GitlabMr = {
 /**
  * `glab api projects/:id/merge_requests/12`: merged, another ticket.
  */
-export const GITLAB_MR_12: GitlabMr = {
+export const GITLAB_MR_12: GitlabMrItem = {
   iid: 12,
   title: 'feat(SHOP-198): add a size chart to the product page',
   source_branch: 'feature/SHOP-198-size-chart',

@@ -27,7 +27,6 @@ import {
 import type {
   GithubPrView,
   GitlabMrApprovals,
-  GitlabMrDetail,
   GitlabMrItem,
   Pr,
   PrGroup,
@@ -52,8 +51,12 @@ const STALE_MS = 3 * 60 * 1000;
 const TICK_MS = 60 * 1000;
 // How long the title command may run for one ticket key.
 const TITLE_TIMEOUT_MS = 2000;
-// How long the browser opener may run.
-const OPEN_TIMEOUT_MS = 10000;
+// How long one `gh` or `glab` call may run.
+const CLI_TIMEOUT_MS = 30000;
+// How long a browser opener gets to fail before it counts as started.
+const START_CHECK_MS = 500;
+
+const ARGUMENT_HINT = '[list | refresh | open <ref> | add <url>]';
 
 const GITHUB_VIEW_FIELDS =
   'number,title,body,url,isDraft,state,headRefName,baseRefName,reviewDecision,statusCheckRollup,mergeStateStatus,latestReviews';
@@ -108,8 +111,8 @@ const NEXT_LOOK: Record<Next['kind'], { color: string; bold: boolean }> = {
 
 /**
  * Runs a CLI call that prints JSON. Resolves `undefined` when the binary
- * cannot start (a machine without that CLI), an error line when it exits
- * non-zero or prints something other than JSON.
+ * cannot start (a machine without that CLI), an error line when it times
+ * out, exits non-zero or prints something other than JSON.
  */
 async function jsonCall(
   $: EngineInterface,
@@ -117,11 +120,16 @@ async function jsonCall(
   init?: ProcessRunInit,
 ): Promise<JsonResult | undefined> {
   const tool = argv[0] ?? '';
+  const timeoutMs = init?.timeoutMs ?? CLI_TIMEOUT_MS;
+  const startedAt = await $.clock.now();
   let out;
   try {
-    out = await $.process.run(argv, init);
+    out = await $.process.run(argv, { ...init, timeoutMs });
   } catch {
-    return undefined;
+    // `process.run` rejects when the command cannot start or still runs at its
+    // timeout; the time it took tells the two apart.
+    if ((await $.clock.now()) - startedAt < timeoutMs) return undefined;
+    return { error: `${tool}: timed out after ${timeoutMs / 1000} s` };
   }
   if (out.exitCode !== 0) {
     const line = out.stderr
@@ -158,10 +166,21 @@ async function fetchGitlab($: EngineInterface, link: PrLink): Promise<PrResult> 
   ]);
   if (!found) return {};
   if ('error' in found) return { error: found.error };
-  const item = found.value as GitlabMrItem & GitlabMrDetail;
   const given =
     approvals && 'value' in approvals ? (approvals.value as GitlabMrApprovals) : undefined;
-  return { pr: fromGitlab(item, item, given) };
+  return mapped('glab', link, () => fromGitlab(found.value as GitlabMrItem, given));
+}
+
+/**
+ * Maps one PR's JSON with `map`. JSON of a shape the mapping cannot read
+ * gives an error line that names the PR, so the other PRs still show.
+ */
+function mapped(tool: string, link: PrLink, map: () => Pr): PrResult {
+  try {
+    return { pr: map() };
+  } catch {
+    return { error: `${tool}: unexpected JSON for ${link.projectPath}${link.ref}` };
+  }
 }
 
 /**
@@ -259,7 +278,7 @@ async function fetchGithub($: EngineInterface, link: PrLink, auth: GithubAuth): 
     if (!init) continue;
     const found = await jsonCall($, argv, init);
     if (!found) return {};
-    if ('value' in found) return { pr: fromGithub(found.value as GithubPrView) };
+    if ('value' in found) return mapped('gh', link, () => fromGithub(found.value as GithubPrView));
     firstError ??= found.error;
   }
   if (firstError) return { error: firstError };
@@ -267,7 +286,7 @@ async function fetchGithub($: EngineInterface, link: PrLink, auth: GithubAuth): 
   const found = await jsonCall($, argv);
   if (!found) return {};
   if ('error' in found) return { error: found.error };
-  return { pr: fromGithub(found.value as GithubPrView) };
+  return mapped('gh', link, () => fromGithub(found.value as GithubPrView));
 }
 
 /**
@@ -349,12 +368,18 @@ async function fetchSnapshot(
  * the fetch ran (a PR created meanwhile); several such asks share one fetch.
  */
 async function fetchCurrent($: EngineInterface, titleOption: string): Promise<Snapshot> {
-  let snap = await fetchSnapshot($, await read($, created), titleOption);
-  while (isPending) {
+  try {
+    let snap = await fetchSnapshot($, await read($, created), titleOption);
+    while (isPending) {
+      isPending = false;
+      snap = await fetchSnapshot($, await read($, created), titleOption);
+    }
+    return snap;
+  } finally {
+    // Cleared in the same step as the last `isPending` check, so a later ask starts a new fetch.
+    inFlight = undefined;
     isPending = false;
-    snap = await fetchSnapshot($, await read($, created), titleOption);
   }
-  return snap;
 }
 
 /**
@@ -362,11 +387,35 @@ async function fetchCurrent($: EngineInterface, titleOption: string): Promise<Sn
  * for one more fetch.
  */
 function refresh($: EngineInterface, titleOption: string): Promise<Snapshot> {
-  if (inFlight) isPending = true;
-  inFlight ??= fetchCurrent($, titleOption).finally(() => {
-    inFlight = undefined;
-  });
+  if (inFlight) {
+    isPending = true;
+    return inFlight;
+  }
+  inFlight = fetchCurrent($, titleOption);
   return inFlight;
+}
+
+/**
+ * Runs work that nobody awaits (a refresh from a tool call, the tick, the
+ * backfill or `add`). A failure shows as an error line in the band.
+ */
+function inBackground($: EngineInterface, work: Promise<unknown>): void {
+  void work.catch(async (error: unknown) => {
+    const line = `my-pr-links: ${reasonOf(error)}`.slice(0, 120);
+    const now = await $.clock.now();
+    await update($, snapshot, (was) => ({
+      fetchedAt: was?.fetchedAt ?? now,
+      groups: was?.groups ?? [],
+      errors: [...new Set([...(was?.errors ?? []), line])],
+    }));
+  });
+}
+
+/**
+ * The message of a caught error, for an error line.
+ */
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /**
@@ -382,10 +431,10 @@ async function track($: EngineInterface, urls: string[]): Promise<boolean> {
 }
 
 /**
- * The PR URLs the tool uses of a transcript created or updated, and those of every
- * agent an Agent tool use there spawned, nested agents included. `seen`
- * holds the agent ids already read; an agent the session cannot read is
- * skipped.
+ * The PR URLs that the tool uses of a transcript created or updated. Also
+ * the PR URLs of each agent that an Agent tool use started there, nested
+ * agents included. `seen` holds the agent ids already read. An agent that
+ * the session cannot read is skipped.
  */
 async function createdInTranscript(
   $: EngineInterface,
@@ -410,7 +459,7 @@ async function createdInTranscript(
 async function backfill($: EngineInterface, titleOption: string): Promise<void> {
   const urls = await createdInTranscript($, await $.session.messages(), new Set());
   await track($, urls);
-  if ((await read($, created)).length > 0) void refresh($, titleOption);
+  if ((await read($, created)).length > 0) inBackground($, refresh($, titleOption));
 }
 
 /**
@@ -420,7 +469,7 @@ async function backfill($: EngineInterface, titleOption: string): Promise<void> 
 async function refreshWhenStale($: EngineInterface, titleOption: string): Promise<void> {
   const [urls, snap, now] = await Promise.all([read($, created), read($, snapshot), $.clock.now()]);
   if (urls.length === 0) return;
-  if (!snap || now - snap.fetchedAt >= STALE_MS) void refresh($, titleOption);
+  if (!snap || now - snap.fetchedAt >= STALE_MS) await refresh($, titleOption);
 }
 
 /**
@@ -441,21 +490,60 @@ function findPr(snap: Snapshot | null, arg: string): Pr | undefined {
 }
 
 /**
- * Opens a URL in the host's browser: the command `$BROWSER` gives when set
- * (see `browserArgv`; no shell); else, or when that command cannot start or
- * times out, on WSL the Windows browser (explorer.exe hands the URL to the
- * Windows default), on macOS `open`, elsewhere `xdg-open`. explorer.exe
- * exits 1 even when it worked.
+ * How a launched opener did: it runs or exited well; it exited with a
+ * failure; or it could not start. `reason` says what went wrong.
+ */
+type Launch = { ok: true } | { ok: false; started: boolean; reason: string };
+
+/**
+ * Starts `argv` and does not wait for it to exit, since a browser may run
+ * on. It counts as a success when it exits 0, or exits at all when
+ * `anyExit` is set, or still runs after `START_CHECK_MS`. The rest of its
+ * output is read and dropped in the background, until it exits or the mod
+ * unloads.
+ */
+async function launch($: EngineInterface, argv: string[], anyExit = false): Promise<Launch> {
+  const tool = argv[0] ?? '';
+  const child = $.process.spawn({ argv });
+  let early;
+  try {
+    early = await Promise.race([child.next(), $.clock.sleep(START_CHECK_MS)]);
+  } catch (error) {
+    // The first pull rejects only when the command cannot start.
+    return { ok: false, started: false, reason: reasonOf(error) };
+  }
+  if (early?.done) {
+    const { code, signal } = early.value;
+    if (code === 0 || anyExit) return { ok: true };
+    const how = signal ? `ended by ${signal}` : `exited ${code ?? 1}`;
+    return { ok: false, started: true, reason: `${tool} ${how}` };
+  }
+  void (async () => {
+    // Each piece is dropped; reading it keeps the child from blocking on a full pipe.
+    for await (const piece of child) void piece;
+  })().catch(() => {
+    // The opener started, so how it ends later changes nothing the band shows.
+  });
+  return { ok: true };
+}
+
+/**
+ * Opens a URL in the host's browser and says where. It runs the command
+ * that `$BROWSER` gives when set (see `browserArgv`; no shell). When
+ * `$BROWSER` is unset or cannot start, it runs the platform opener: on WSL
+ * explorer.exe (it hands the URL to the Windows default browser and exits 1
+ * even when it worked), on macOS `open`, elsewhere `xdg-open`. Rejects with
+ * the reason when no opener worked.
  */
 async function openUrl($: EngineInterface, url: string): Promise<string> {
   const browser = browserArgv((await $.env.get('BROWSER')) ?? '', url);
+  const reasons: string[] = [];
   if (browser.length > 0) {
-    try {
-      await $.process.run(browser, { timeoutMs: OPEN_TIMEOUT_MS });
-      return 'browser';
-    } catch {
-      // `$BROWSER` cannot start or timed out: the platform opener below takes over.
-    }
+    const run = await launch($, browser);
+    if (run.ok) return 'browser';
+    if (run.started) throw new Error(run.reason);
+    // `$BROWSER` cannot start: the platform opener below takes over.
+    reasons.push(run.reason);
   }
   const kernel = await $.process.run(['uname', '-sr']);
   const os = kernel.stdout.toLowerCase();
@@ -464,7 +552,8 @@ async function openUrl($: EngineInterface, url: string): Promise<string> {
     : os.includes('microsoft')
       ? ['explorer.exe', url]
       : ['xdg-open', url];
-  await $.process.run(argv, { timeoutMs: OPEN_TIMEOUT_MS });
+  const run = await launch($, argv, argv[0] === 'explorer.exe');
+  if (!run.ok) throw new Error([...reasons, run.reason].join('; '));
   return argv[0] === 'explorer.exe'
     ? 'Windows browser'
     : argv[0] === 'open'
@@ -473,10 +562,17 @@ async function openUrl($: EngineInterface, url: string): Promise<string> {
 }
 
 /**
- * Opens a clicked PR link and says which PR it was.
+ * Opens a clicked PR link and says in a toast which PR it was, or why it
+ * could not open.
  */
 async function openPr($: EngineInterface, href: string): Promise<void> {
-  const where = await openUrl($, href);
+  let where;
+  try {
+    where = await openUrl($, href);
+  } catch (error) {
+    $.ui.toast(`⑂ could not open ${href}: ${reasonOf(error)}`);
+    return;
+  }
   const pr = allPrs(await read($, snapshot)).find((m) => m.url === href);
   $.ui.toast(`⑂ opened ${pr ? `${pr.repo} ${pr.ref}` : href} in ${where}`);
 }
@@ -506,11 +602,11 @@ export const register: Register = (on, options) => {
       name: 'my-pr-links',
       description:
         "Show or hide the band of this session's pull requests; list prints them all; refresh fetches now; open <ref> opens one (42, !42, #88); add <url> adds an MR/PR",
-      argumentHint: '[list | refresh | open <ref> | add <url>]',
+      argumentHint: ARGUMENT_HINT,
     });
 
     await backfill($, titleOption);
-    $.clock.every(TICK_MS, () => void refreshWhenStale($, titleOption));
+    $.clock.every(TICK_MS, () => inBackground($, refreshWhenStale($, titleOption)));
 
     return next(e);
   });
@@ -518,7 +614,7 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e);
     const urls = trackedUrls(e.tool, e, ran.text ?? '');
-    if (urls.length > 0 && (await track($, urls))) void refresh($, titleOption);
+    if (urls.length > 0 && (await track($, urls))) inBackground($, refresh($, titleOption));
     return ran;
   }).catch(($, e, next) => next(e));
 
@@ -546,8 +642,12 @@ export const register: Register = (on, options) => {
     if (verb === 'open') {
       const pr = findPr(await read($, snapshot), arg ?? '');
       if (!pr) return { text: `No PR ${arg ?? ''} in the band.` };
-      const where = await openUrl($, pr.url);
-      return { text: `Opened ${pr.repo} ${pr.ref} in ${where}` };
+      try {
+        const where = await openUrl($, pr.url);
+        return { text: `Opened ${pr.repo} ${pr.ref} in ${where}` };
+      } catch (error) {
+        return { text: `Could not open ${pr.url}: ${reasonOf(error)}` };
+      }
     }
 
     if (verb === 'add') {
@@ -557,9 +657,11 @@ export const register: Register = (on, options) => {
           text: 'Usage: /my-pr-links add <url> (https://host/group/project/-/merge_requests/<n> or https://host/owner/repo/pull/<n>)',
         };
       if (!(await track($, [link.url]))) return { text: `${link.url} is already in the band.` };
-      void refresh($, titleOption);
+      inBackground($, refresh($, titleOption));
       return { text: `Added ${link.ref} to the band.` };
     }
+
+    if (verb) return { text: `Unknown subcommand ${verb}. Usage: /my-pr-links ${ARGUMENT_HINT}` };
 
     const hidden = await update($, isHidden, (was) => !was);
     return {

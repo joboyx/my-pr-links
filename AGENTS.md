@@ -5,29 +5,32 @@ The plugin lives at the repo root. User docs are in `README.md`.
 
 ## Layout
 
-| Path                              | Content                                                               |
-| --------------------------------- | --------------------------------------------------------------------- |
-| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, listing fields, `userConfig`        |
-| `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`             |
-| `hooks/hooks.json`                | Hook module list                                                      |
-| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open          |
+| Path                              | Content                                                                              |
+| --------------------------------- | ------------------------------------------------------------------------------------ |
+| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, listing fields, `userConfig`                       |
+| `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`                            |
+| `.claude-plugin/types/`           | Mod API types that Claude Code generates; git-ignored (see below)                    |
+| `hooks/hooks.json`                | Hook module list                                                                     |
+| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open                         |
 | `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, `$BROWSER` argv |
-| `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output             |
-| `hooks/*.test.ts`                 | Unit tests                                                            |
-| `types/index.d.ts`                | Types for the mod API                                                 |
-| `.agents/skills/`                 | Repo skills `verify` and `release` (`.claude/skills` links here)      |
+| `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output                            |
+| `hooks/*.test.ts`                 | Unit tests                                                                           |
+| `types/index.d.ts`                | Types of the plugin's own state (`PluginState`)                                      |
+| `.agents/skills/`                 | Repo skills `verify` and `release` (`.claude/skills` links here)                     |
+
+Claude Code writes `.claude-plugin/types/` beside the mod when it loads the mod from this folder, and writes it again after a Claude Code update. The folder's own `.gitignore` keeps it out of git. The first line of `claude-code/index.d.ts` names the Claude Code version that wrote it. A fresh clone gets the folder on the first load, such as `claude --plugin-dir .`. Do not edit it.
 
 ## Commands
 
 Run from the repo root.
 
-| Task                          | Command                                  |
-| ----------------------------- | ---------------------------------------- |
-| Unit tests                    | `claude plugin test .`                   |
-| Manifest and layout check     | `claude plugin validate . --strict`      |
-| Plugin directory check        | `claude plugin validate . --profile directory` |
-| Load this copy for a session  | `claude --plugin-dir .`                  |
-| Tag a release                 | `claude plugin tag .` (tag `my-pr-links--vX.Y.Z`) |
+| Task                         | Command                                           |
+| ---------------------------- | ------------------------------------------------- |
+| Unit tests                   | `claude plugin test .`                            |
+| Manifest and layout check    | `claude plugin validate . --strict`               |
+| Plugin directory check       | `claude plugin validate . --profile directory`    |
+| Load this copy for a session | `claude --plugin-dir .`                           |
+| Tag a release                | `claude plugin tag .` (tag `my-pr-links--vX.Y.Z`) |
 
 After a code change in a running session, run `/reload-plugins`, or restart `claude`.
 
@@ -37,8 +40,8 @@ A ticket key matches `[A-Z][A-Z0-9]{1,9}-\d+`. The first rule that matches gives
 
 1. Branch: a key at the start of a path segment (`feature/ABC-123-retry`, `ABC-123-ui`).
 2. Conventional-commit scope is a key, also inside a scope list (`feat(ABC-123): …`, `fix(api,ABC-123): …`).
-3. Title starts with `ABC-123: ` or `[ABC-123] `. A bare `ABC-123 x` does not count.
-4. A description line `Refs|Ref|Closes|Fixes|Resolves|Issue|Ticket|Task|Jira`, then the key, which ends the line or a `,`/`;` list item (`Refs: ABC-123`, `Closes ABC-1, ABC-2`). The match never crosses lines.
+3. The title, or its text after the commit type, starts with `KEY: ` or `[KEY] ` (`ABC-123: x`, `feat: ABC-123: x`). A bare `ABC-123 x` does not count.
+4. A description line that starts with the whole word `Refs|Ref|Closes|Fixes|Resolves|Issue|Ticket|Task|Jira` (any case), an optional `:`, then a `,`/`;` list. The first list item that is a whole key wins; a leading `#` and a trailing `.` are dropped (`Refs: ABC-123.`, `Closes #12, ABC-2` gives `ABC-2`). The match never crosses lines.
 5. No key, and 2 or more PRs in the band share a source branch that is not `main`, `master`, `develop`, `dev`, `trunk`, `staging` or `production`: the branch name is the key.
 
 Keys in running text never count. A key whose letter part is `CVE`, `UTF`, `SHA`, `ISO`, `HTTP`, `RFC`, `TLS`, `MD` or `GHSA` never counts in any rule (`STANDARD_PREFIXES` in `hooks/prs.ts`). Lowercase keys (`eng-123`) are not supported. Only a lowercase word is a conventional-commit type.

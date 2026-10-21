@@ -92,6 +92,10 @@ Keep the printed `$OUT` path. Use a unique session name per run, for example `pr
 
 The band shows the short repo name (`cli`, `kafka`). Command replies stay on screen above the band, so match a band row by its columns (`#14767 +cli +Bump`), not by the ref alone.
 
+`wait_for` patterns are extended regular expressions (`grep -E`): `+` means one or more, so `#14767 +cli ` matches the ref, one or more spaces, then `cli`.
+
+Between two `add` commands, wait up to 4 s for the reply to the first one: `wait_for <session> 'Added #<n>' 4`.
+
 ## Scenarios
 
 Session A runs with no title command. Session B runs with the title command stub.
@@ -105,15 +109,15 @@ ready "$A"; snap "$A" 00-start
 | #  | Scenario                     | Steps (session A unless named)                                                                                 | Pass when                                                                                         |
 | -- | ---------------------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | 1  | Plugin loads                 | `send "$A" '/my-pr-links list'`; `wait_for "$A" 'No pull requests'`; `snap "$A" 01-load`                       | Reply `my-pr-links: No pull requests created or updated in this session yet.`                     |
-| 2  | Add                          | `send` `add` for both `cli/cli` URLs; `wait_for "$A" '#14722 +cli ' 60`; `snap "$A" 02-add`                    | Replies `Added #14767 to the band.` and `Added #14722 to the band.`; both rows show above the prompt |
+| 2  | Add                          | `send` `add` for `cli/cli/pull/14767`; `wait_for "$A" 'Added #14767' 4`; `send` `add` for `cli/cli/pull/14722`; `wait_for "$A" '#14722 +cli ' 60`; `snap "$A" 02-add` | Replies `Added #14767 to the band.` and `Added #14722 to the band.`; both rows show above the prompt |
 | 3  | Plain list, no header        | Read `02-add.txt`                                                                                              | The rows have no header: no `other` line and no key line above them (`grep -E '^\s*other\b'` finds nothing) |
 | 4  | List                         | `send "$A" '/my-pr-links list'`; `snap "$A" 04-list`                                                           | Output names `#14767` and `#14722` with their state                                               |
 | 5  | Refresh                      | `send "$A" '/my-pr-links refresh'`; `wait_for "$A" '2 PRs from this session'`; `snap "$A" 05-refresh`         | Reply `2 PRs from this session`; the band shows `just now`                                        |
 | 6  | Open via `$BROWSER`          | `send "$A" '/my-pr-links open #14767'`; `wait_for "$A" 'Opened'`; `snap "$A" 06-open`; `cat "$OUT/opened.txt"` | `opened.txt` holds `https://github.com/cli/cli/pull/14767`; reply starts `Opened cli #14767`; no browser window opens |
 | 7  | Hide                         | `send "$A" '/my-pr-links'`; `wait_for "$A" 'PR band hidden'`; `snap "$A" 07-hide`                              | Reply `PR band hidden.`; no `#14767 +cli ` row above the prompt                                   |
 | 8  | Show                         | `send "$A" '/my-pr-links'`; `wait_for "$A" '#14767 +cli '`; `snap "$A" 08-show`                                | Reply `PR band shown above the prompt.`; the rows are back                                        |
-| 9  | Groups, title command off    | `send` `add` for both `apache/kafka` URLs; `wait_for "$A" '#23867 +kafka ' 60`; `snap "$A" 09-groups-no-title` | Header lines `KAFKA-21305` and `KAFKA-21307` with no title text; the `cli` rows sit under `other`; `title-calls.txt` does not exist |
-| 10 | Title command on             | `B=prl-b-<timestamp>`; `start "$B" "MY_PR_LINKS_TASK_TITLE_CMD='$OUT/bin/title'"`; `ready "$B"`; `send` `add` for `apache/kafka/pull/23862` and `cli/cli/pull/14767`; `wait_for "$B" 'Verify title for KAFKA-21305' 60`; `snap "$B" 10-title-on` | Header `KAFKA-21305` then `Verify title for KAFKA-21305`; `title-calls.txt` holds `KAFKA-21305`; the `cli` row sits under `other` |
+| 9  | Groups, title command off    | `send` `add` for `apache/kafka/pull/23862`; `wait_for "$A" 'Added #23862' 4`; `send` `add` for `apache/kafka/pull/23867`; `wait_for "$A" '#23867 +kafka ' 60`; `snap "$A" 09-groups-no-title` | Header lines `KAFKA-21305` and `KAFKA-21307` with no title text; the `cli` rows sit under `other`; `title-calls.txt` does not exist |
+| 10 | Title command on             | `B=prl-b-<timestamp>`; `start "$B" "MY_PR_LINKS_TASK_TITLE_CMD='$OUT/bin/title'"`; `ready "$B"`; `send` `add` for `apache/kafka/pull/23862`; `wait_for "$B" 'Added #23862' 4`; `send` `add` for `cli/cli/pull/14767`; `wait_for "$B" 'Verify title for KAFKA-21305' 60`; `wait_for "$B" '#14767 +cli ' 60` (the title shows before the second fetch ends); `snap "$B" 10-title-on` | Header `KAFKA-21305` then `Verify title for KAFKA-21305`; `title-calls.txt` holds `KAFKA-21305`; the `cli` row sits under `other` |
 
 For each scenario, compare the capture with the pass rule. On a fail, keep the capture, take one more capture after 10 s (a fetch can be slow), and record both.
 

@@ -11,7 +11,6 @@ import {
   GITLAB_NO_RULE_APPROVALS,
   SESSION_CREATE_CALLS,
 } from './fixtures';
-import type { GitlabMr } from './fixtures';
 import {
   browserArgv,
   buildGroups,
@@ -27,17 +26,16 @@ import {
   ticketOf,
   trackedUrls,
 } from './prs';
-import type { GithubCheck, GithubPrView, GitlabMrDetail, Pr, PrGroup } from './prs';
+import type { GithubCheck, GithubPrView, GitlabMrItem, Pr, PrGroup } from './prs';
 
 const byRef = (prs: Pr[], ref: string) => prs.find((m) => m.ref === ref)!;
 
 /**
- * Maps a single-MR response the way the band does: the response is both
- * the item and its detail.
+ * Maps a single-MR response with approvals, the way the band does.
  */
-const gitlab = (pr: GitlabMr, approvals = GITLAB_41_APPROVALS) => fromGitlab(pr, pr, approvals);
+const gitlab = (pr: GitlabMrItem, approvals = GITLAB_41_APPROVALS) => fromGitlab(pr, approvals);
 
-const gitlabItem = (over: Partial<GitlabMr>): GitlabMr => ({
+const gitlabItem = (over: Partial<GitlabMrItem>): GitlabMrItem => ({
   ...GITLAB_MR_41,
   head_pipeline: undefined,
   ...over,
@@ -334,6 +332,24 @@ test('rule 4: the trailer key ends its line or a list item, and never crosses li
   expect(ticketOf('fix/x', 'x', 'Task\nSHOP-214')).toBeUndefined();
   // A GitHub body from the web editor has CRLF line ends.
   expect(ticketOf('fix/x', 'x', 'Adds retry.\r\n\r\nRefs: SHOP-214\r\n')).toBe('SHOP-214');
+  expect(ticketOf('fix/x', 'x', 'Fixes ABC-123 later')).toBeUndefined();
+  // A trailing `.` ends the key like the line end.
+  expect(ticketOf('fix/x', 'x', 'Refs: ABC-123.')).toBe('ABC-123');
+});
+
+test('rule 4: the trailer keyword is a whole word', () => {
+  for (const keyword of ['Ref', 'Issue', 'Task', 'Jira']) {
+    expect(ticketOf('fix/x', 'x', `${keyword}: ABC-123`)).toBe('ABC-123');
+  }
+  expect(ticketOf('fix/x', 'x', 'TaskABC-12')).toBeUndefined();
+  expect(ticketOf('fix/x', 'x', 'Refsx: ABC-12')).toBeUndefined();
+});
+
+test('rule 4: the first list item that is a key wins', () => {
+  expect(ticketOf('fix/x', 'x', 'Closes #12, ABC-2')).toBe('ABC-2');
+  expect(ticketOf('fix/x', 'x', 'Closes #12; #ABC-2')).toBe('ABC-2');
+  expect(ticketOf('fix/x', 'x', 'Closes ABC-1 later, ABC-2')).toBe('ABC-2');
+  expect(ticketOf('fix/x', 'x', 'Closes #12, #13')).toBeUndefined();
 });
 
 test('standard codes never form a key, in any rule', () => {
@@ -494,7 +510,7 @@ test('the row title cut never splits an emoji', () => {
 
   expect(cut).toBe(`${'x'.repeat(48)}🚀…`);
   expect(Array.from(cut)).toHaveLength(50);
-  // Old UTF-16 cut would leave a lone high surrogate before the ellipsis.
+  // The cut counts code points, so no lone high surrogate is left before the ellipsis.
   expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut)).toBe(false);
   expect(rowTitleOf(`${'x'.repeat(49)}🚀`)).toBe(`${'x'.repeat(49)}🚀`);
 });
@@ -558,13 +574,13 @@ test('GitHub checks map to failing, running, and ready', () => {
 });
 
 test('GitLab pipeline maps to failing and running', () => {
-  const failing = fromGitlab(GITLAB_MR_41, { head_pipeline: { status: 'failed' } });
+  const failing = fromGitlab({ ...GITLAB_MR_41, head_pipeline: { status: 'failed' } });
   expect([failing.state, failing.ci]).toEqual(['failing', 'fail']);
 
-  const running = fromGitlab(GITLAB_MR_41, { head_pipeline: { status: 'pending' } });
+  const running = fromGitlab({ ...GITLAB_MR_41, head_pipeline: { status: 'pending' } });
   expect([running.state, running.ci]).toEqual(['running', 'run']);
 
-  const noPipeline = fromGitlab(GITLAB_MR_42, GITLAB_MR_42);
+  const noPipeline = fromGitlab(GITLAB_MR_42);
   expect([noPipeline.state, noPipeline.ci]).toEqual(['review', undefined]);
 
   const missing = gitlab(GITLAB_MR_41, { approvals_required: 2, approvals_left: 1 });
@@ -593,7 +609,7 @@ test('a finished ticket keeps its merged PRs and sorts after open tickets, befor
 /**
  * A GitLab MR of ticket ABC-1 in `repo`, on its own source branch.
  */
-const ticketPr = (iid: number, state: string, repo = 'shop-api', over: Partial<GitlabMr> = {}) =>
+const ticketPr = (iid: number, state: string, repo = 'shop-api', over: Partial<GitlabMrItem> = {}) =>
   fromGitlab(
     gitlabItem({
       iid,
@@ -713,7 +729,7 @@ test('a PR moved off a base that is still open sorts by repo then number', () =>
 
 test('a PR stacked on an open PR of another group keeps the mark, not the place', () => {
   const groupA = ticketPr(300, 'opened', 'shop-api', { source_branch: 'feature/ABC-1-base' });
-  const groupB = (iid: number, over: Partial<GitlabMr> = {}) =>
+  const groupB = (iid: number, over: Partial<GitlabMrItem> = {}) =>
     ticketPr(iid, 'opened', 'shop-api', {
       title: `feat(WEB-2): change ${iid}`,
       source_branch: `feature/WEB-2-${iid}`,
@@ -759,10 +775,14 @@ test('a finished group header says all merged, merged and closed, or all closed'
 });
 
 test('groups sort failing, then yours, then waiting, with other last', () => {
-  const pr = (key: string, iid: number, detail?: GitlabMrDetail) =>
+  const pr = (key: string, iid: number, over: Partial<GitlabMrItem> = {}) =>
     fromGitlab(
-      gitlabItem({ iid, source_branch: `feature/${key}-x`, detailed_merge_status: 'mergeable' }),
-      detail,
+      gitlabItem({
+        iid,
+        source_branch: `feature/${key}-x`,
+        detailed_merge_status: 'mergeable',
+        ...over,
+      }),
     );
   const waitingA = fromGitlab(
     gitlabItem({ iid: 1, source_branch: 'feature/AAA-1-x', detailed_merge_status: 'not_approved' }),
@@ -779,8 +799,8 @@ test('groups sort failing, then yours, then waiting, with other last', () => {
       title: 'fix: no key',
       detailed_merge_status: 'mergeable',
       references: { full: 'acme/platform/shop-api!5' },
+      head_pipeline: { status: 'failed' },
     }),
-    { head_pipeline: { status: 'failed' } },
   );
 
   const groups = buildGroups([other, waitingB, yours, waitingA, failing]);
@@ -854,7 +874,7 @@ test('a GitLab MR without an approval rule shows the given count', () => {
   expect([none.state, none.approvals]).toEqual(['ready', '0']);
   expect(isReadyUnapproved(none)).toBe(true);
 
-  expect(fromGitlab(GITLAB_MR_41, GITLAB_MR_41).approvals).toBeUndefined();
+  expect(fromGitlab(GITLAB_MR_41).approvals).toBeUndefined();
 });
 
 test('every unfinished or failed status maps to running or failing', () => {
@@ -866,7 +886,7 @@ test('every unfinished or failed status maps to running or failing', () => {
   expect(ciOf({ state: 'EXPECTED' })).toBe('run');
 
   for (const status of ['preparing', 'waiting_for_resource', 'scheduled']) {
-    expect(fromGitlab(GITLAB_MR_41, { head_pipeline: { status } }).ci).toBe('run');
+    expect(fromGitlab({ ...GITLAB_MR_41, head_pipeline: { status } }).ci).toBe('run');
   }
 });
 

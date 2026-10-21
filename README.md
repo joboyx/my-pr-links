@@ -61,8 +61,8 @@ A ticket key matches `[A-Z][A-Z0-9]{1,9}-\d+`. The first rule that matches gives
 | - | -------------------- | ------------------------------------------------------------- | ------------------------- |
 | 1 | Branch               | key at the start of a path segment: `feature/ABC-123-retry`, `ABC-123-ui` | `feature/fix-ABC-123` |
 | 2 | Commit-style scope   | `feat(ABC-123): …`, `fix(api,ABC-123): …`                     |                           |
-| 3 | Title prefix         | `ABC-123: …`, `[ABC-123] …`                                   | `ABC-123 fix retry`       |
-| 4 | Description line     | `Refs: ABC-123`, `Closes ABC-1, ABC-2`; also `Ref`, `Fixes`, `Resolves`, `Issue`, `Ticket`, `Task`, `Jira`. The key ends the line or a list item | `Fixes ABC-123 later` |
+| 3 | Title prefix         | the title, or its text after the commit type, starts with `KEY: ` or `[KEY] `: `ABC-123: …`, `[ABC-123] …`, `feat: ABC-123: …` | `ABC-123 fix retry` |
+| 4 | Description line     | `Refs: ABC-123`, `Closes ABC-1, ABC-2`, `Closes #12, ABC-2`; also `Ref`, `Fixes`, `Resolves`, `Issue`, `Ticket`, `Task`, `Jira` as whole words. The first list item that is a whole key wins; a trailing `.` is allowed | `Fixes ABC-123 later`, `TaskABC-12` |
 | 5 | Shared source branch | no key, and 2 or more PRs share a branch that is not `main`, `master`, `develop`, `dev`, `trunk`, `staging` or `production` | |
 
 Keys in running text never count. Standard codes never count in any rule: keys that start with `CVE`, `UTF`, `SHA`, `ISO`, `HTTP`, `RFC`, `TLS`, `MD` or `GHSA` (`fix/CVE-2024-1234`, `UTF-8`, `ISO-8601`). Lowercase keys such as `eng-123` are not supported.
@@ -72,6 +72,18 @@ Groups show first. PRs with no key go under `other` when a group exists. With no
 Known limit: rule 5 compares branch names only. GitHub web-editor branches such as `patch-1` in different repos can form one shared-branch group.
 
 A row shows the PR title without a draft marker (`Draft:`, `WIP:`, `[Draft]`, `[WIP]`, `(Draft)`), the commit type and the group's own key. Only a lowercase word is a commit type, so `Release: v1.2` stays as written. An area scope stays as `scope: desc`. When nothing is left, the row shows the full title. Rows are cut at 50 characters with `…`.
+
+## Stacked PRs
+
+A PR whose target branch is the source branch of another open PR in the same repo stacks on that PR. Its row shows `⧗ after <ref>`. In the same group it sorts right after its base. When the base merges, the mark goes and the PR keeps its place.
+
+## Several GitHub accounts
+
+When `gh` is logged in to more than one github.com account, the mod fetches each PR as an account that can read it:
+
+- Once per fetch, it lists the accounts with `gh auth status --json hosts --hostname github.com`.
+- It tries the account named like the repo owner first, then the active account, then the others.
+- For an account that is not active, it reads the token with `gh auth token --hostname github.com --user <login>` and gives it to `gh` in `GH_TOKEN`. It keeps the token for that fetch only.
 
 ## Header titles
 
@@ -106,7 +118,7 @@ export MY_PR_LINKS_TASK_TITLE_CMD=~/bin/jira-title
 
 ## Browser
 
-Links open with `$BROWSER` when it is set. The mod takes the first entry of a `:`-separated list, splits it on spaces, and puts the URL in place of `%s`, or last. When `$BROWSER` is unset, cannot start or times out, the mod uses `explorer.exe` on WSL, `open` on macOS and `xdg-open` on other systems.
+Links open with `$BROWSER` when it is set. The mod takes the first entry of a `:`-separated list, splits it on spaces, and puts the URL in place of `%s`, or last. It does not wait for the browser to exit. When `$BROWSER` is unset or cannot start, the mod uses `explorer.exe` on WSL, `open` on macOS and `xdg-open` on other systems. When no opener works, or `$BROWSER` exits with an error, the mod says why. Point `$BROWSER` at a launcher that hands the URL off and exits (`xdg-open`, `wslview`, `open`). A browser that the mod starts itself stops when the mod reloads.
 
 ## What it runs
 
