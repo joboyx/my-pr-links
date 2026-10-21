@@ -31,7 +31,10 @@ export const GITLAB_MR_41: GitlabMrItem = {
   web_url: 'https://gitlab.com/acme/platform/shop-api/-/merge_requests/41',
   references: { full: 'acme/platform/shop-api!41' },
   has_conflicts: false,
-  head_pipeline: { status: 'success' },
+  head_pipeline: {
+    status: 'success',
+    web_url: 'https://gitlab.com/acme/platform/shop-api/-/pipelines/5001',
+  },
 };
 
 /**

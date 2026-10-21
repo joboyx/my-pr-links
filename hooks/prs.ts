@@ -44,6 +44,11 @@ export type Pr = {
   state: PrState;
   ci?: CiStatus;
   /**
+   * The page of the head pipeline (GitLab) or of one check (GitHub), when the
+   * provider gives one.
+   */
+  ciUrl?: string;
+  /**
    * Given approvals over required approvals, such as `1/1`, when the GitLab
    * MR has an approval rule; else the given count alone, such as `0` or `2`
    * (a GitHub PR, open, merged or closed, or a GitLab MR without a rule).
@@ -154,7 +159,7 @@ export type GitlabMrItem = {
   state: string;
   detailed_merge_status?: string;
   has_conflicts?: boolean;
-  head_pipeline?: { status: string } | null;
+  head_pipeline?: { status: string; web_url?: string } | null;
   web_url: string;
   references: { full: string };
 };
@@ -173,12 +178,16 @@ export type GitlabMrApprovals = {
 
 /**
  * One entry of a pull request's `statusCheckRollup`: a check run carries
- * `status` and `conclusion`, a commit status context carries `state`.
+ * `status`, `conclusion` and `detailsUrl`, a commit status context carries
+ * `state` and `targetUrl`. `gh` writes an empty string or `null` for a
+ * missing URL.
  */
 export type GithubCheck = {
   status?: string;
   conclusion?: string;
   state?: string;
+  detailsUrl?: string | null;
+  targetUrl?: string | null;
 };
 
 /**
@@ -489,6 +498,7 @@ export function fromGitlab(item: GitlabMrItem, approvals?: GitlabMrApprovals): P
     targetBranch: item.target_branch,
     state,
     ci,
+    ciUrl: item.head_pipeline?.web_url || undefined,
     approvals: gitlabApprovals(approvals),
     ticket,
     note: notes.length > 0 ? notes.join(', ') : undefined,
@@ -508,20 +518,45 @@ const CONTEXT_RUNNING = ['PENDING', 'EXPECTED'];
 const CHECK_PASSED = ['SUCCESS', 'NEUTRAL', 'SKIPPED'];
 
 /**
+ * Whether the check's conclusion (check run) or state (status context) is
+ * one of `values`.
+ */
+const hasResult = (c: GithubCheck, values: string[]) =>
+  [c.conclusion, c.state].some((v) => v !== undefined && values.includes(v));
+
+/**
+ * Whether the check failed.
+ */
+const isCheckFailed = (c: GithubCheck) => hasResult(c, CHECK_FAILED);
+
+/**
+ * Whether the check is not finished yet.
+ */
+const isCheckRunning = (c: GithubCheck) =>
+  (c.status !== undefined && CHECK_RUNNING.includes(c.status)) ||
+  (c.state !== undefined && CONTEXT_RUNNING.includes(c.state));
+
+/**
  * Folds a PR's check runs and status contexts into one CI status: any
  * failure fails, else anything unfinished runs, else all passed passes.
  */
 function githubCi(checks: GithubCheck[]): CiStatus | undefined {
   if (checks.length === 0) return undefined;
-  const has = (c: GithubCheck, values: string[]) =>
-    [c.conclusion, c.state].some((v) => v !== undefined && values.includes(v));
-  if (checks.some((c) => has(c, CHECK_FAILED))) return 'fail';
-  const isRunning = (c: GithubCheck) =>
-    (c.status !== undefined && CHECK_RUNNING.includes(c.status)) ||
-    (c.state !== undefined && CONTEXT_RUNNING.includes(c.state));
-  if (checks.some(isRunning)) return 'run';
-  if (checks.every((c) => has(c, CHECK_PASSED))) return 'pass';
+  if (checks.some(isCheckFailed)) return 'fail';
+  if (checks.some(isCheckRunning)) return 'run';
+  if (checks.every((c) => hasResult(c, CHECK_PASSED))) return 'pass';
   return undefined;
+}
+
+/**
+ * The page of the check that explains the CI status: the first failed check
+ * with a URL, else the first running one, else the first check with a URL.
+ */
+function githubCiUrl(checks: GithubCheck[]): string | undefined {
+  const urlOf = (c: GithubCheck) => c.detailsUrl || c.targetUrl || undefined;
+  const failed = checks.filter(isCheckFailed);
+  const running = checks.filter(isCheckRunning);
+  return [...failed, ...running, ...checks].map(urlOf).find((url) => url !== undefined);
 }
 
 /**
@@ -559,6 +594,7 @@ export function fromGithub(view: GithubPrView): Pr {
     targetBranch: view.baseRefName,
     state,
     ci,
+    ciUrl: githubCiUrl(view.statusCheckRollup),
     approvals: githubApprovals(view),
     ticket,
   };
@@ -727,6 +763,52 @@ export function outcomeOf(group: PrGroup): { text: string; color: string } {
 export function ageOf(fetchedAt: number, now: number): string {
   const minutes = Math.floor((now - fetchedAt) / 60000);
   return minutes < 1 ? 'just now' : `${minutes}m ago`;
+}
+
+/**
+ * The states a toast announces when a PR moves into them.
+ */
+const TOAST_STATES: PrState[] = ['merged', 'closed', 'failing', 'ready'];
+
+/**
+ * The states that start a new CI cycle: moving into one forgets what was
+ * announced for the PR, so the next result is announced again.
+ */
+const NEW_CYCLE_STATES: PrState[] = ['running', 'failing', 'draft'];
+
+/**
+ * The states already announced for each PR, by URL.
+ */
+export type Announced = Record<string, PrState[]>;
+
+/**
+ * Toast text for the PRs whose state changed into merged, closed, CI failed
+ * or ready to merge since the previous snapshot, such as `✔ !42 shop-api
+ * merged · ✖ #88 docs CI failed`, and the announced states updated with
+ * them. A PR matches by URL; a PR not in `previous` (the first snapshot, a
+ * newly tracked PR) or not in `next` (missing from this fetch) is skipped.
+ * A state already in `announced` for the PR is not announced again, so a
+ * merge status that blips (ready, review, ready) toasts once; a change into
+ * running, failing or draft forgets the PR's announced states first. `text`
+ * is `undefined` when nothing is announced.
+ */
+export function changesOf(
+  previous: Pr[],
+  next: Pr[],
+  announced: Announced = {},
+): { text?: string; announced: Announced } {
+  const record: Announced = { ...announced };
+  const changes = next.flatMap((m) => {
+    const was = previous.find((p) => p.url === m.url);
+    if (!was || was.state === m.state) return [];
+    if (NEW_CYCLE_STATES.includes(m.state)) delete record[m.url];
+    const said = record[m.url] ?? [];
+    if (!TOAST_STATES.includes(m.state) || said.includes(m.state)) return [];
+    record[m.url] = [...said, m.state];
+    const look = LOOK[m.state];
+    return [`${look.icon} ${m.ref} ${m.repo} ${look.label}`];
+  });
+  return { text: changes.length > 0 ? changes.join(' · ') : undefined, announced: record };
 }
 
 /**

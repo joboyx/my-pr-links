@@ -25,6 +25,7 @@ export type BandPr = {
   targetBranch: string;
   state: 'merged' | 'ready' | 'review' | 'failing' | 'running' | 'draft' | 'closed';
   ci?: 'pass' | 'fail' | 'run';
+  ciUrl?: string;
   approvals?: string;
   ticket?: string;
   stackedOn?: string;

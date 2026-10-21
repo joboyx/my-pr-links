@@ -11,6 +11,7 @@ import {
   ageOf,
   browserArgv,
   buildGroups,
+  changesOf,
   CI_TEXT,
   trackedUrls,
   fromGithub,
@@ -25,6 +26,7 @@ import {
   parsePrUrl,
 } from './prs';
 import type {
+  Announced,
   GithubPrView,
   GitlabMrApprovals,
   GitlabMrItem,
@@ -39,16 +41,23 @@ import type {
  * PR band: the pull requests (GitHub PRs and GitLab merge requests) this session
  * (or one of its subagents) created or updated, above the prompt, grouped by
  * ticket key or shared source branch and fetched one by one with `glab` and
- * `gh`. Click a PR to open it in the host browser; hover it for the full
- * title. `/my-pr-links` shows or hides the band, `list` prints every PR of
- * the last fetch, `refresh` fetches now, `add <url>` adds a PR the session
- * did not touch. The `task_title_cmd` option, else `MY_PR_LINKS_TASK_TITLE_CMD`,
- * names an executable that prints the header title of a ticket key.
+ * `gh`. Click a PR to open it in the host browser, or its CI cell to open
+ * the pipeline or checks page; hover it for the full title. A toast says
+ * when a PR merges, closes, fails CI or becomes ready to merge.
+ * `/my-pr-links` shows or hides the band, `list` prints every PR of the last
+ * fetch, `refresh` fetches now, `open <ref> [ci]` opens a PR or its CI page,
+ * `add <url>` adds a PR the session did not touch. The `task_title_cmd`
+ * option, else `MY_PR_LINKS_TASK_TITLE_CMD`, names an executable that prints
+ * the header title of a ticket key.
  */
 
 const STALE_MS = 3 * 60 * 1000;
+// Stale sooner while a PR is about to change: CI running or ready to merge.
+const ACTIVE_STALE_MS = 60 * 1000;
 // How often the band checks whether its snapshot is stale.
 const TICK_MS = 60 * 1000;
+// Past this many PRs in the snapshot, a finished group shows its header line only.
+const MAX_BAND_ROWS = 12;
 // How long the title command may run for one ticket key.
 const TITLE_TIMEOUT_MS = 2000;
 // How long one `gh` or `glab` call may run.
@@ -56,14 +65,14 @@ const CLI_TIMEOUT_MS = 30000;
 // How long a browser opener gets to fail before it counts as started.
 const START_CHECK_MS = 500;
 
-const ARGUMENT_HINT = '[list | refresh | open <ref> | add <url>]';
+const ARGUMENT_HINT = '[list | refresh | open <ref> [ci] | add <url>]';
 
 const GITHUB_VIEW_FIELDS =
   'number,title,body,url,isDraft,state,headRefName,baseRefName,reviewDecision,statusCheckRollup,mergeStateStatus,latestReviews';
 
 const isHidden = atom({ plugin: 'my-pr-links', key: 'isHidden' } as const, false);
 const snapshot = atom({ plugin: 'my-pr-links', key: 'snapshot' } as const, null, {
-  shape: 'prs-3',
+  shape: 'prs-4',
 });
 const created = atom({ plugin: 'my-pr-links', key: 'created' } as const, []);
 
@@ -71,6 +80,8 @@ const created = atom({ plugin: 'my-pr-links', key: 'created' } as const, []);
 // set `isPending`, so it fetches once more when done.
 let inFlight: Promise<Snapshot> | undefined;
 let isPending = false;
+// The states each PR's toasts announced in this session, by URL.
+let announced: Announced = {};
 
 /**
  * What one PR's fetch found: the PR, an error line when its call failed, or
@@ -339,8 +350,10 @@ async function ticketTitles(
 
 /**
  * Fetches each created PR, groups them with the stack bases of the previous
- * snapshot, and saves the snapshot to the state the band draws.
- * `titleOption` is the `task_title_cmd` option, empty when unset.
+ * snapshot, and saves the snapshot to the state the band draws. Toasts the
+ * PRs that merged, closed, failed CI or became ready to merge since the
+ * previous snapshot. `titleOption` is the `task_title_cmd` option, empty
+ * when unset.
  */
 async function fetchSnapshot(
   $: EngineInterface,
@@ -360,6 +373,9 @@ async function fetchSnapshot(
 
   const snap: Snapshot = { fetchedAt, groups, errors };
   await update($, snapshot, () => snap);
+  const changes = changesOf(previous, allPrs(snap), announced);
+  announced = changes.announced;
+  if (changes.text) $.ui.toast(changes.text);
   return snap;
 }
 
@@ -463,13 +479,25 @@ async function backfill($: EngineInterface, titleOption: string): Promise<void> 
 }
 
 /**
- * Refreshes once the snapshot is older than 3 minutes, while the session has
- * created PRs.
+ * How old the snapshot may get before a refresh: 1 minute while any PR in it
+ * has CI running or is ready to merge, else 3 minutes.
+ */
+function staleAfterOf(snap: Snapshot): number {
+  const isActive = allPrs(snap).some((m) => m.state === 'running' || m.state === 'ready');
+  return isActive ? ACTIVE_STALE_MS : STALE_MS;
+}
+
+/**
+ * Refreshes once the snapshot is stale (`staleAfterOf`, less half a tick),
+ * while the session has created PRs.
  */
 async function refreshWhenStale($: EngineInterface, titleOption: string): Promise<void> {
   const [urls, snap, now] = await Promise.all([read($, created), read($, snapshot), $.clock.now()]);
   if (urls.length === 0) return;
-  if (!snap || now - snap.fetchedAt >= STALE_MS) await refresh($, titleOption);
+  // Half a tick of slack: the fetch reads its time a little after the tick
+  // that started it, so the next tick can see an age just under the limit.
+  if (!snap || now - snap.fetchedAt >= staleAfterOf(snap) - TICK_MS / 2)
+    await refresh($, titleOption);
 }
 
 /**
@@ -578,6 +606,21 @@ async function openPr($: EngineInterface, href: string): Promise<void> {
 }
 
 /**
+ * Opens the CI page of a PR whose CI cell was pressed and says in a toast
+ * which PR it was, or why it could not open.
+ */
+async function openCi($: EngineInterface, pr: Pr, url: string): Promise<void> {
+  let where;
+  try {
+    where = await openUrl($, url);
+  } catch (error) {
+    $.ui.toast(`⑂ could not open ${url}: ${reasonOf(error)}`);
+    return;
+  }
+  $.ui.toast(`⑂ opened CI of ${pr.repo} ${pr.ref} in ${where}`);
+}
+
+/**
  * `N PRs from this session`, then any fetch errors.
  */
 function summaryOf(count: number, snap: Snapshot): string {
@@ -590,7 +633,7 @@ function summaryOf(count: number, snap: Snapshot): string {
  * backfill of PRs created or updated earlier in the session and a one-minute tick that
  * refreshes a stale snapshot; a `tool.call` observer that tracks each PR a
  * call creates or updates, in the main loop or a subagent's; the command's toggle,
- * `list`, `refresh`, `open <ref>` and `add <url>`; and the band drawn on
+ * `list`, `refresh`, `open <ref> [ci]` and `add <url>`; and the band drawn on
  * `AbovePrompt`. `options.task_title_cmd` is the title command option.
  */
 export const register: Register = (on, options) => {
@@ -601,7 +644,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'my-pr-links',
       description:
-        "Show or hide the band of this session's pull requests; list prints them all; refresh fetches now; open <ref> opens one (42, !42, #88); add <url> adds an MR/PR",
+        "Show or hide the band of this session's pull requests; list prints them all; refresh fetches now; open <ref> opens one (42, !42, #88), open <ref> ci its CI page; add <url> adds an MR/PR",
       argumentHint: ARGUMENT_HINT,
     });
 
@@ -619,7 +662,7 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e));
 
   on('command.run', { command: 'my-pr-links' }, async ($, e) => {
-    const [verb, arg] = e.args.trim().split(/\s+/);
+    const [verb, arg, target] = e.args.trim().split(/\s+/);
 
     if (verb === 'list') {
       if ((await read($, created)).length === 0)
@@ -642,11 +685,14 @@ export const register: Register = (on, options) => {
     if (verb === 'open') {
       const pr = findPr(await read($, snapshot), arg ?? '');
       if (!pr) return { text: `No PR ${arg ?? ''} in the band.` };
+      const isCi = target?.toLowerCase() === 'ci';
+      if (isCi && !pr.ciUrl) return { text: `No CI page for ${pr.ref}.` };
+      const url = isCi && pr.ciUrl ? pr.ciUrl : pr.url;
       try {
-        const where = await openUrl($, pr.url);
-        return { text: `Opened ${pr.repo} ${pr.ref} in ${where}` };
+        const where = await openUrl($, url);
+        return { text: `Opened ${isCi ? 'CI of ' : ''}${pr.repo} ${pr.ref} in ${where}` };
       } catch (error) {
-        return { text: `Could not open ${pr.url}: ${reasonOf(error)}` };
+        return { text: `Could not open ${url}: ${reasonOf(error)}` };
       }
     }
 
@@ -677,16 +723,20 @@ export const register: Register = (on, options) => {
     const snap = await read($, snapshot);
     if (!snap || (snap.groups.length === 0 && snap.errors.length === 0)) return next(e);
 
-    const { Box, Text, Markdown } = $.ui.resolve(e);
+    const { Box, Text, Markdown, Button } = $.ui.resolve(e);
 
     const age = ageOf(snap.fetchedAt, await $.clock.now());
     const ageText = (first: boolean) => (first ? <Text dimColor> · {age}</Text> : null);
 
-    // Every PR has a row, so the column widths stay when a PR merges or closes.
     const { groups } = snap;
-    const rowPrs = groups.flatMap((g) => g.prs);
     // With no ticket or shared-branch group, the PRs are plain rows with no header.
     const headed = hasHeaders(groups);
+    // Every PR has a row, so the column widths stay when a PR merges or closes.
+    // Past MAX_BAND_ROWS PRs, every finished group with a header folds to that
+    // header line; a plain list has no header to fold to, so it keeps its rows.
+    const folds = headed && allPrs(snap).length > MAX_BAND_ROWS;
+    const drawnPrsOf = (group: PrGroup) => (folds && isFinished(group) ? [] : group.prs);
+    const rowPrs = groups.flatMap(drawnPrsOf);
 
     const refWidth = Math.max(0, ...rowPrs.map((m) => m.ref.length));
     const repoWidth = Math.max(0, ...rowPrs.map((m) => m.repo.length));
@@ -706,6 +756,15 @@ export const register: Register = (on, options) => {
       // A closed row is dim except its icon and label; a finished row hides its stale note.
       const isClosed = m.state === 'closed';
       const showsNote = m.state !== 'draft' && m.state !== 'merged' && !isClosed;
+      const ciCell = isClosed ? (
+        <Text dimColor>{ci.padEnd(4)}</Text>
+      ) : (
+        <Text color={m.ci === 'fail' ? 'error' : m.ci === 'run' ? 'warning' : 'inactive'}>
+          {ci.padEnd(4)}
+        </Text>
+      );
+      // A CI cell with a page opens it on a press, in the cell's own color.
+      const ciUrl = ci ? m.ciUrl : undefined;
       return (
         <Box key={scope} gap={2} paddingLeft={headed ? 2 : 0}>
           <Box gap={1} flexShrink={0}>
@@ -727,13 +786,13 @@ export const register: Register = (on, options) => {
               {m.rowTitle}
             </Text>
           </Box>
-          <Box flexShrink={0}>
-            {isClosed ? (
-              <Text dimColor>{ci.padEnd(4)}</Text>
+          <Box width={4} flexShrink={0}>
+            {ciUrl ? (
+              <Button key={`ci-${scope}`} plain onPress={() => void openCi($, m, ciUrl)}>
+                {ciCell}
+              </Button>
             ) : (
-              <Text color={m.ci === 'fail' ? 'error' : m.ci === 'run' ? 'warning' : 'inactive'}>
-                {ci.padEnd(4)}
-              </Text>
+              ciCell
             )}
           </Box>
           {approvalsWidth > 0 && (
@@ -785,7 +844,9 @@ export const register: Register = (on, options) => {
     const groupOf = (group: PrGroup, first: boolean) => {
       const key = `group-${group.kind}-${group.id}`;
       if (!headed) {
-        const rows: RenderChildren[] = group.prs.map((m, i) => prRow(group, m, first && i === 0));
+        const rows: RenderChildren[] = drawnPrsOf(group).map((m, i) =>
+          prRow(group, m, first && i === 0),
+        );
         return (
           <Box key={key} flexDirection="column">
             {rows}
@@ -793,7 +854,7 @@ export const register: Register = (on, options) => {
         );
       }
 
-      const rows: RenderChildren[] = group.prs.map((m) => prRow(group, m, false));
+      const rows: RenderChildren[] = drawnPrsOf(group).map((m) => prRow(group, m, false));
       const step = nextOf(group);
       const outcome = isFinished(group) ? outcomeOf(group) : undefined;
 
@@ -828,7 +889,7 @@ export const register: Register = (on, options) => {
 
     const band = (
       <Box flexDirection="column">
-        {groups.flatMap((group) => group.prs.map((m) => detail(group, m)))}
+        {groups.flatMap((group) => drawnPrsOf(group).map((m) => detail(group, m)))}
         {snap.errors.length > 0 && <Text dimColor>⚠ {snap.errors.join(' · ')}</Text>}
         {groups.map((group, i) => groupOf(group, i === 0))}
       </Box>

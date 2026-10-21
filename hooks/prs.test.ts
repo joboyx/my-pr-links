@@ -14,6 +14,7 @@ import {
 import {
   browserArgv,
   buildGroups,
+  changesOf,
   fromGithub,
   fromGitlab,
   hasHeaders,
@@ -26,7 +27,7 @@ import {
   ticketOf,
   trackedUrls,
 } from './prs';
-import type { GithubCheck, GithubPrView, GitlabMrItem, Pr, PrGroup } from './prs';
+import type { Announced, GithubCheck, GithubPrView, GitlabMrItem, Pr, PrGroup } from './prs';
 
 const byRef = (prs: Pr[], ref: string) => prs.find((m) => m.ref === ref)!;
 
@@ -588,6 +589,128 @@ test('GitLab pipeline maps to failing and running', () => {
 
   const conflicts = fromGitlab(gitlabItem({ has_conflicts: true }));
   expect(conflicts.note).toBe('has conflicts');
+});
+
+test('a GitLab MR takes its CI page from the head pipeline web_url', () => {
+  const web_url = 'https://gitlab.com/acme/platform/shop-api/-/pipelines/5002';
+  const failed = fromGitlab({ ...GITLAB_MR_41, head_pipeline: { status: 'failed', web_url } });
+  expect([failed.ci, failed.ciUrl]).toEqual(['fail', web_url]);
+
+  expect(gitlab(GITLAB_MR_41).ciUrl).toBe(GITLAB_MR_41.head_pipeline?.web_url);
+  // No pipeline (`null` or absent), or a pipeline without a page: no CI page.
+  expect(gitlab(GITLAB_MR_42).ciUrl).toBeUndefined();
+  expect(fromGitlab(GITLAB_MR_17).ciUrl).toBeUndefined();
+  expect(fromGitlab(gitlabItem({ head_pipeline: { status: 'running' } })).ciUrl).toBeUndefined();
+  expect(
+    fromGitlab(gitlabItem({ head_pipeline: { status: 'running', web_url: '' } })).ciUrl,
+  ).toBeUndefined();
+});
+
+test('a GitHub PR takes its CI page from the failed, else running, else first check', () => {
+  const PASSED = 'https://github.com/octo-org/docs/actions/runs/1/job/11';
+  const FAILED = 'https://github.com/octo-org/docs/actions/runs/2/job/22';
+  const PENDING = 'https://ci.example.com/build/3';
+  const ciUrlOf = (statusCheckRollup: GithubCheck[]) =>
+    fromGithub(githubView({ statusCheckRollup })).ciUrl;
+
+  const passed: GithubCheck = { status: 'COMPLETED', conclusion: 'SUCCESS', detailsUrl: PASSED };
+  const failed: GithubCheck = { status: 'COMPLETED', conclusion: 'FAILURE', detailsUrl: FAILED };
+  const pending: GithubCheck = { state: 'PENDING', targetUrl: PENDING };
+
+  expect(ciUrlOf([passed, pending, failed])).toBe(FAILED);
+  expect(ciUrlOf([passed, pending])).toBe(PENDING);
+  expect(ciUrlOf([passed, { state: 'SUCCESS', targetUrl: PENDING }])).toBe(PASSED);
+  // gh writes an empty string or null when a check has no page: the next check with one wins.
+  expect(ciUrlOf([{ ...failed, detailsUrl: '' }, passed])).toBe(PASSED);
+  expect(ciUrlOf([{ ...failed, detailsUrl: null, targetUrl: null }, passed])).toBe(PASSED);
+  expect(ciUrlOf([{ state: 'SUCCESS', targetUrl: '' }])).toBeUndefined();
+  expect(ciUrlOf([])).toBeUndefined();
+});
+
+/**
+ * A PR in `state`, else like `m`.
+ */
+const as = (m: Pr, state: Pr['state']): Pr => ({ ...m, state });
+
+test('changesOf lists each PR that merged, closed, failed CI or became ready, once', () => {
+  const mr41 = gitlab(GITLAB_MR_41);
+  const mr42 = gitlab(GITLAB_MR_42);
+  const mr17 = fromGitlab(GITLAB_MR_17);
+  const pr88 = fromGithub(githubView({}));
+  const previous = [as(mr41, 'running'), as(mr42, 'review'), mr17, as(pr88, 'review')];
+
+  expect(
+    changesOf(previous, [
+      as(mr41, 'failing'),
+      as(mr42, 'merged'),
+      as(mr17, 'closed'),
+      as(pr88, 'ready'),
+    ]).text,
+  ).toBe(
+    '✖ !41 shop-api CI failed · ✔ !42 shop-api merged · ⊘ !17 web closed · ● #88 docs ready to merge',
+  );
+});
+
+test('changesOf stays quiet on a first, new, missing, unchanged or other change', () => {
+  const mr41 = gitlab(GITLAB_MR_41);
+  const mr42 = gitlab(GITLAB_MR_42);
+  const merged = as(mr42, 'merged');
+
+  expect(changesOf([], [merged]).text).toBeUndefined();
+  expect(changesOf([mr41], [mr41, merged]).text).toBeUndefined();
+  expect(changesOf([mr41, mr42], [mr41]).text).toBeUndefined();
+  expect(changesOf([merged], [merged]).text).toBeUndefined();
+  expect(changesOf([mr42], [as(mr42, 'running')]).text).toBeUndefined();
+});
+
+/**
+ * The toast texts of a PR passing through `states`, one snapshot each, with
+ * the announced states carried from snapshot to snapshot.
+ */
+function toastsThrough(pr: Pr, states: Pr['state'][]): (string | undefined)[] {
+  let announced: Announced = {};
+  const texts: (string | undefined)[] = [];
+  for (let i = 1; i < states.length; i++) {
+    const changes = changesOf([as(pr, states[i - 1]!)], [as(pr, states[i]!)], announced);
+    announced = changes.announced;
+    texts.push(changes.text);
+  }
+  return texts;
+}
+
+test('a ready PR whose merge status blips back to review is announced ready once', () => {
+  expect(toastsThrough(gitlab(GITLAB_MR_41), ['review', 'ready', 'review', 'ready'])).toEqual([
+    '● !41 shop-api ready to merge',
+    undefined,
+    undefined,
+  ]);
+  const github = fromGithub(githubView({}));
+  expect(toastsThrough(github, ['review', 'ready', 'review', 'ready', 'review', 'ready'])).toEqual([
+    '● #88 docs ready to merge',
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+  ]);
+});
+
+test('a new CI run forgets what was announced, so its result is announced again', () => {
+  const ready = '● #88 docs ready to merge';
+  const github = fromGithub(githubView({}));
+  expect(toastsThrough(github, ['review', 'ready', 'running', 'ready'])).toEqual([
+    ready,
+    undefined,
+    ready,
+  ]);
+  const failed = '✖ !41 shop-api CI failed';
+  expect(
+    toastsThrough(gitlab(GITLAB_MR_41), ['running', 'failing', 'running', 'failing']),
+  ).toEqual([failed, undefined, failed]);
+  // A failure after ready is announced too.
+  expect(toastsThrough(github, ['review', 'ready', 'failing'])).toEqual([
+    ready,
+    '✖ #88 docs CI failed',
+  ]);
 });
 
 test('a finished ticket keeps its merged PRs and sorts after open tickets, before other', () => {

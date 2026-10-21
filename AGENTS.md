@@ -12,7 +12,7 @@ The plugin lives at the repo root. User docs are in `README.md`.
 | `.claude-plugin/types/`           | Mod API types that Claude Code generates; git-ignored (see below)                    |
 | `hooks/hooks.json`                | Hook module list                                                                     |
 | `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open                         |
-| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, `$BROWSER` argv |
+| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, change toasts, `$BROWSER` argv |
 | `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output                            |
 | `hooks/*.test.ts`                 | Unit tests                                                                           |
 | `types/index.d.ts`                | Types of the plugin's own state (`PluginState`)                                      |

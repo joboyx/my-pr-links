@@ -83,7 +83,7 @@ type Answer = { exitCode?: number; stdout?: string; stderr?: string } | 'missing
  * answers the title command; `uname` is what `uname -sr` prints (a WSL
  * kernel when unset); `missing` lists the binaries that cannot start;
  * `tools` answers other binaries by name; `env` is the environment the
- * plugin reads.
+ * plugin reads; `mrs` adds shop-api MRs, answered by iid.
  */
 type Hosts = {
   glab?: Answer;
@@ -96,6 +96,7 @@ type Hosts = {
   missing?: string[];
   tools?: Record<string, Answer>;
   env?: Record<string, string>;
+  mrs?: GitlabMrItem[];
 };
 
 /**
@@ -153,6 +154,8 @@ function answerOf(argv: readonly string[], hosts: Hosts, env?: Record<string, st
     if (path === `${WEB}/17`) return ok(GITLAB_MR_17);
     if (path === `${SHOP_API}/7`) return ok(CLOSED_7);
     if (path === `${SHOP_API}/28`) return ok(MERGED_28);
+    const added = hosts.mrs?.find((m) => path === `${SHOP_API}/${m.iid}`);
+    if (added) return ok(added);
     return failed;
   }
   const view = hosts.views?.[argv[3] ?? ''];
@@ -241,6 +244,18 @@ function toolsFor(on: On): { agents: (string | undefined)[] } {
     return { result: { stdout: text, stderr: '', interrupted: false }, text };
   });
   return { agents };
+}
+
+/**
+ * Records the text of every toast the plugin shows, in order.
+ */
+function toastsFor(on: On): string[] {
+  const toasts: string[] = [];
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text);
+    return { value: undefined };
+  });
+  return toasts;
 }
 
 /**
@@ -819,15 +834,223 @@ test('the tick refreshes once the snapshot is 3 minutes old', async ($, on) => {
   sessionFor(on);
 
   await $.session.start(START);
+  // The fetch starts half a second after the tick time.
+  await clock.advance(500);
   await createShopApiPr($);
   await clock.settle();
   const fetches = () => ran.filter((argv) => argv[2] === `${SHOP_API}/42`).length;
   expect(fetches()).toBe(1);
 
-  await clock.advance(2 * 60 * 1000);
+  // The ticks at 1 and 2 minutes see an age under 3 minutes less half a tick.
+  await clock.advance(2 * 60 * 1000 - 500);
   expect(fetches()).toBe(1);
   await clock.advance(60 * 1000);
   expect(fetches()).toBe(2);
+});
+
+const RUNNING_CHECK = 'https://github.com/octo-org/docs/actions/runs/7/job/70';
+
+for (const [state, hosts, create, isFetch] of [
+  [
+    'GitLab CI running',
+    { glab: ok({ ...GITLAB_MR_42, head_pipeline: { status: 'running' } }) },
+    createShopApiPr,
+    (argv: string[]) => argv[2] === `${SHOP_API}/42`,
+  ],
+  [
+    'GitLab ready to merge',
+    // `glab` answers the approvals call with the MR too: no approval left.
+    { glab: ok({ ...GITLAB_MR_42, detailed_merge_status: 'mergeable' }) },
+    createShopApiPr,
+    (argv: string[]) => argv[2] === `${SHOP_API}/42`,
+  ],
+  [
+    'GitHub CI running',
+    {
+      views: {
+        [PR_88]: {
+          ...GITHUB_88_VIEW,
+          isDraft: false,
+          statusCheckRollup: [{ status: 'IN_PROGRESS', detailsUrl: RUNNING_CHECK }],
+        },
+      },
+    },
+    ($: Engine) => $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' }),
+    (argv: string[]) => argv[1] === 'pr' && argv[3] === PR_88,
+  ],
+] as const) {
+  test(`the next tick refreshes at 59.5 s while a PR is ${state}`, async ($, on) => {
+    const { ran, clock } = hostsFor(on, hosts);
+    toolsFor(on);
+    sessionFor(on);
+
+    await $.session.start(START);
+    // The fetch starts half a second after the tick time.
+    await clock.advance(500);
+    await create($);
+    await clock.settle();
+    const fetches = () => ran.filter(isFetch).length;
+    expect(fetches()).toBe(1);
+
+    await clock.advance(60 * 1000 - 500);
+    expect(fetches()).toBe(2);
+  });
+}
+
+test('a refresh after a PR merged or closed toasts the change once, for both hosts', async ($, on) => {
+  const hosts: Hosts = {};
+  const { clock } = hostsFor(on, hosts);
+  toolsFor(on);
+  const toasts = toastsFor(on);
+  const refreshNow = () => $.command.run({ command: 'my-pr-links', args: 'refresh', ...COMPOSER });
+
+  await createShopApiPr($);
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+  await refreshNow();
+  expect(toasts).toEqual([]);
+
+  hosts.glab = ok({ ...GITLAB_MR_42, state: 'merged' });
+  hosts.views = { [PR_88]: { ...GITHUB_88_VIEW, isDraft: false, state: 'CLOSED' } };
+  await refreshNow();
+  await refreshNow();
+  expect(toasts).toEqual(['✔ !42 shop-api merged · ⊘ #88 docs closed']);
+});
+
+const PIPELINE = 'https://gitlab.com/acme/platform/shop-api/-/pipelines/5003';
+
+test('a press on the CI cell opens the pipeline page; open <ref> ci does it by ref', async ($, on) => {
+  const { ran, clock } = hostsFor(on, {
+    glab: ok({ ...GITLAB_MR_42, head_pipeline: { status: 'failed', web_url: PIPELINE } }),
+  });
+  toolsFor(on);
+  const toasts = toastsFor(on);
+  const run = (args: string) => $.command.run({ command: 'my-pr-links', args, ...COMPOSER });
+
+  await createShopApiPr($);
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  const cell = await ui.find({ type: 'Text', text: 'CI ✖' });
+  expect(cell?.props).toMatchObject({ color: 'error' });
+  await ui.press({ key: 'ci-pr-ticket-SHOP-214-gitlab-shop-api-42' });
+  expect(ran).toContainEqual(['explorer.exe', PIPELINE]);
+  expect(toasts).toEqual(['⑂ opened CI of shop-api !42 in Windows browser']);
+
+  expect((await run('open !42 ci')).text).toBe('Opened CI of shop-api !42 in Windows browser');
+  expect((await run('open 42 CI')).text).toBe('Opened CI of shop-api !42 in Windows browser');
+  // #88 has no checks, so no CI page.
+  expect((await run('open #88 ci')).text).toBe('No CI page for #88.');
+  expect(ran.filter((argv) => argv[0] === 'explorer.exe')).toEqual([
+    ['explorer.exe', PIPELINE],
+    ['explorer.exe', PIPELINE],
+    ['explorer.exe', PIPELINE],
+  ]);
+});
+
+test('a GitHub CI cell opens the check page with $BROWSER, from a press or open <ref> ci', async ($, on) => {
+  const view = {
+    ...GITHUB_88_VIEW,
+    isDraft: false,
+    statusCheckRollup: [{ status: 'IN_PROGRESS', detailsUrl: RUNNING_CHECK }],
+  };
+  const { ran, clock } = hostsFor(on, {
+    views: { [PR_88]: view },
+    env: { BROWSER: '/usr/local/bin/web-browser' },
+  });
+  toolsFor(on);
+  const toasts = toastsFor(on);
+
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect((await ui.find({ type: 'Text', text: 'CI …' }))?.props).toMatchObject({ color: 'warning' });
+  await ui.press({ key: 'ci-pr-other-other-github-docs-88' });
+  const out = await $.command.run({ command: 'my-pr-links', args: 'open #88 ci', ...COMPOSER });
+
+  expect(toasts).toEqual(['⑂ opened CI of docs #88 in browser']);
+  expect(out.text).toBe('Opened CI of docs #88 in browser');
+  expect(ran.filter((argv) => argv[0] === '/usr/local/bin/web-browser')).toEqual([
+    ['/usr/local/bin/web-browser', RUNNING_CHECK],
+    ['/usr/local/bin/web-browser', RUNNING_CHECK],
+  ]);
+});
+
+test('a CI page that cannot open says why, from the cell and from open <ref> ci', async ($, on) => {
+  const { clock } = hostsFor(on, {
+    glab: ok({ ...GITLAB_MR_42, head_pipeline: { status: 'failed', web_url: PIPELINE } }),
+    env: { BROWSER: 'firefox' },
+    missing: ['firefox', 'explorer.exe'],
+  });
+  toolsFor(on);
+  const toasts = toastsFor(on);
+  await createShopApiPr($);
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  await ui.press({ key: 'ci-pr-ticket-SHOP-214-gitlab-shop-api-42' });
+  await clock.settle();
+  const out = await $.command.run({ command: 'my-pr-links', args: 'open !42 ci', ...COMPOSER });
+
+  const reason =
+    'my-pr-links: $.process.spawn: firefox: not found; my-pr-links: $.process.spawn: explorer.exe: not found';
+  expect(toasts).toEqual([`⑂ could not open ${PIPELINE}: ${reason}`]);
+  expect(out.text).toBe(`Could not open ${PIPELINE}: ${reason}`);
+});
+
+test('past 12 PRs a finished group shows its header only; open groups keep every row', async ($, on) => {
+  const done = Array.from({ length: 12 }, (_, i) =>
+    finishedMr(301 + i, 'merged', {
+      title: `feat(ABC-7): done change ${301 + i}`,
+      source_branch: `feature/ABC-7-done-${301 + i}`,
+    }),
+  );
+  const { clock } = hostsFor(on, { mrs: done });
+  toolsFor(on);
+  const run = (args: string) => $.command.run({ command: 'my-pr-links', args, ...COMPOSER });
+  const mount = () => $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+
+  await createShopApiPr($);
+  for (const mr of done.slice(0, 11)) await run(`add ${mr.web_url}`);
+  await clock.settle();
+
+  // 12 PRs: every row drawn.
+  const full = await mount();
+  expect(await full.find({ text: /\[!301\]/ })).toBeDefined();
+  expect(await full.find({ text: /\[!42\]/ })).toBeDefined();
+
+  await run(`add ${done[11]!.web_url}`);
+  await clock.settle();
+
+  // 13 PRs: the finished group keeps its header, the open group keeps its row.
+  const folded = await mount();
+  expect(await folded.find({ text: /\[!3\d\d\]/ })).toBeUndefined();
+  expect((await folded.find({ key: 'group-ticket-ABC-7' }))?.text).toMatch(/all 12 merged/);
+  expect(await folded.find({ text: /\[!42\]/ })).toBeDefined();
+  expect((await run('list')).text).toMatch(/\[!312\]/);
+});
+
+test('past 12 PRs a plain list with no header keeps every row', async ($, on) => {
+  const merged = (number: number): GithubPrView => ({
+    ...GITHUB_88_VIEW,
+    isDraft: false,
+    state: 'MERGED',
+    number,
+    headRefName: `octo-user/change-${number}`,
+    url: `https://github.com/octo-org/docs/pull/${number}`,
+  });
+  const prs = Array.from({ length: 13 }, (_, i) => merged(101 + i));
+  const { clock } = hostsFor(on, { views: Object.fromEntries(prs.map((p) => [p.url, p])) });
+  sessionFor(on, createdTranscript(prs.map((p) => p.url)));
+
+  await $.session.start(START);
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await ui.find({ text: /\[#101\]/ })).toBeDefined();
+  expect(await ui.find({ text: /\[#113\]/ })).toBeDefined();
 });
 
 test('a PR created while a fetch runs gets one more fetch', async ($, on) => {
@@ -1079,7 +1302,7 @@ test('/my-pr-links toggles the band', async ($) => {
 test('an unknown subcommand shows the usage and leaves the band as it was', async ($) => {
   const out = await $.command.run({ command: 'my-pr-links', args: 'lsit', ...COMPOSER });
   expect(out.text).toBe(
-    'Unknown subcommand lsit. Usage: /my-pr-links [list | refresh | open <ref> | add <url>]',
+    'Unknown subcommand lsit. Usage: /my-pr-links [list | refresh | open <ref> [ci] | add <url>]',
   );
 
   const hid = await $.command.run({ command: 'my-pr-links', args: '', ...COMPOSER });

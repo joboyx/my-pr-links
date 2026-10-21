@@ -1,6 +1,6 @@
 # my-pr-links
 
-A Claude Code mod. It draws a band above the prompt with the pull requests that the session and its subagents created or updated: GitHub PRs through `gh`, GitLab merge requests through `glab`. Each row shows the state, CI, approvals, and each group shows the next action. Click a ref to open it in the browser.
+A Claude Code mod. It draws a band above the prompt with the pull requests that the session and its subagents created or updated: GitHub PRs through `gh`, GitLab merge requests through `glab`. Each row shows the state, CI, approvals, and each group shows the next action. Click a ref to open it in the browser, or a CI cell to open the pipeline (GitLab) or check (GitHub) page.
 
 ```text
 SHOP-214  Retry failed card payments  ▸ you merge #88 · just now
@@ -49,9 +49,16 @@ Third-party marketplaces do not auto-update by default. Turn it on in `/plugin` 
 | `/my-pr-links list`       | Print every PR of the last fetch, with links              |
 | `/my-pr-links refresh`    | Fetch now                                                 |
 | `/my-pr-links open <ref>` | Open one PR: `42`, `!42`, `#88`                        |
+| `/my-pr-links open <ref> ci` | Open the CI page of one PR: the pipeline or a check    |
 | `/my-pr-links add <url>`  | Add a PR or MR that the session did not create or update  |
 
-The band fetches again when a tool call creates or updates a PR, and every few minutes while it is open.
+The band fetches again when a tool call creates or updates a PR. It also fetches every 3 minutes, or every minute while a PR has CI running or is ready to merge.
+
+A toast says when a PR merges, closes, fails CI or becomes ready to merge, once per change. A new CI run can announce its result again.
+
+Past 12 PRs, a finished group (every PR merged or closed) shows only its header line. A plain list with no header keeps every row. `list` always prints every PR.
+
+`open <ref> ci` and the CI cell open the head pipeline of a GitLab merge request. For a GitHub PR they open the first failed check, else the first running check, else the first check with a page.
 
 ## Grouping
 
@@ -129,7 +136,7 @@ The mod runs these commands as you, with no shell:
 | `gh`                | Fetch a GitHub PR (`gh pr view`), read logins (`gh auth status`, `gh auth token`) |
 | `glab`              | Fetch a GitLab merge request and its approvals (`glab api`)      |
 | The title command   | Once per ticket key per fetch, when you set one                  |
-| `$BROWSER`, `uname`, `explorer.exe`, `open` or `xdg-open` | When you click a ref or run `/my-pr-links open` |
+| `$BROWSER`, `uname`, `explorer.exe`, `open` or `xdg-open` | When you click a ref or a CI cell, or run `/my-pr-links open` |
 
 ## Development
 
