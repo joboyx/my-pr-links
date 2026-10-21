@@ -9,6 +9,7 @@ import type {
 
 import {
   ageOf,
+  browserArgv,
   buildGroups,
   CI_TEXT,
   trackedUrls,
@@ -42,8 +43,8 @@ import type {
  * `gh`. Click a PR to open it in the host browser; hover it for the full
  * title. `/my-pr-links` shows or hides the band, `list` prints every PR of
  * the last fetch, `refresh` fetches now, `add <url>` adds a PR the session
- * did not touch. `MY_PR_LINKS_TASK_TITLE_CMD` names an executable that
- * prints the header title of a ticket key.
+ * did not touch. The `task_title_cmd` option, else `MY_PR_LINKS_TASK_TITLE_CMD`,
+ * names an executable that prints the header title of a ticket key.
  */
 
 const STALE_MS = 3 * 60 * 1000;
@@ -51,13 +52,15 @@ const STALE_MS = 3 * 60 * 1000;
 const TICK_MS = 60 * 1000;
 // How long the title command may run for one ticket key.
 const TITLE_TIMEOUT_MS = 2000;
+// How long the browser opener may run.
+const OPEN_TIMEOUT_MS = 10000;
 
 const GITHUB_VIEW_FIELDS =
   'number,title,body,url,isDraft,state,headRefName,baseRefName,reviewDecision,statusCheckRollup,mergeStateStatus,latestReviews';
 
 const isHidden = atom({ plugin: 'my-pr-links', key: 'isHidden' } as const, false);
 const snapshot = atom({ plugin: 'my-pr-links', key: 'snapshot' } as const, null, {
-  shape: 'prs-2',
+  shape: 'prs-3',
 });
 const created = atom({ plugin: 'my-pr-links', key: 'created' } as const, []);
 
@@ -292,17 +295,19 @@ async function titleOf($: EngineInterface, command: string, key: string): Promis
 }
 
 /**
- * The header title of each ticket key, from the executable that
- * `MY_PR_LINKS_TASK_TITLE_CMD` names, run as `<cmd> <KEY>` (no shell) once
- * per key. No titles when the variable is unset; a key the command gives no
- * title for stays untitled.
+ * The header title of each ticket key, from the title command run as
+ * `<cmd> <KEY>` (no shell) once per key. The command is the `task_title_cmd`
+ * option (`titleOption`) when it is set, else the executable that
+ * `MY_PR_LINKS_TASK_TITLE_CMD` names. No titles when neither is set; a key
+ * the command gives no title for stays untitled.
  */
 async function ticketTitles(
   $: EngineInterface,
   keys: readonly string[],
+  titleOption: string,
 ): Promise<Record<string, string>> {
   if (keys.length === 0) return {};
-  const command = (await $.env.get('MY_PR_LINKS_TASK_TITLE_CMD'))?.trim();
+  const command = titleOption || (await $.env.get('MY_PR_LINKS_TASK_TITLE_CMD'))?.trim();
   if (!command) return {};
   const found = await Promise.all(keys.map((key) => titleOf($, command, key)));
   const titles: Record<string, string> = {};
@@ -316,8 +321,13 @@ async function ticketTitles(
 /**
  * Fetches each created PR, groups them with the stack bases of the previous
  * snapshot, and saves the snapshot to the state the band draws.
+ * `titleOption` is the `task_title_cmd` option, empty when unset.
  */
-async function fetchSnapshot($: EngineInterface, urls: readonly string[]): Promise<Snapshot> {
+async function fetchSnapshot(
+  $: EngineInterface,
+  urls: readonly string[],
+  titleOption: string,
+): Promise<Snapshot> {
   const fetchedAt = await $.clock.now();
   const auth = await githubAuthOf($, urls);
   const results = await Promise.all(urls.map((url) => fetchPr($, url, auth)));
@@ -327,7 +337,7 @@ async function fetchSnapshot($: EngineInterface, urls: readonly string[]): Promi
   const keys = [...new Set(prs.flatMap((m) => (m.ticket ? [m.ticket] : [])))];
   // The previous snapshot keeps a stacked PR after its base once the base merged.
   const previous = allPrs(await read($, snapshot));
-  const groups = buildGroups(prs, await ticketTitles($, keys), previous);
+  const groups = buildGroups(prs, await ticketTitles($, keys, titleOption), previous);
 
   const snap: Snapshot = { fetchedAt, groups, errors };
   await update($, snapshot, () => snap);
@@ -338,11 +348,11 @@ async function fetchSnapshot($: EngineInterface, urls: readonly string[]): Promi
  * Fetches the created PRs, then once more when a refresh was asked for while
  * the fetch ran (a PR created meanwhile); several such asks share one fetch.
  */
-async function fetchCurrent($: EngineInterface): Promise<Snapshot> {
-  let snap = await fetchSnapshot($, await read($, created));
+async function fetchCurrent($: EngineInterface, titleOption: string): Promise<Snapshot> {
+  let snap = await fetchSnapshot($, await read($, created), titleOption);
   while (isPending) {
     isPending = false;
-    snap = await fetchSnapshot($, await read($, created));
+    snap = await fetchSnapshot($, await read($, created), titleOption);
   }
   return snap;
 }
@@ -351,9 +361,9 @@ async function fetchCurrent($: EngineInterface): Promise<Snapshot> {
  * Refreshes the snapshot, or joins the refresh already running and asks it
  * for one more fetch.
  */
-function refresh($: EngineInterface): Promise<Snapshot> {
+function refresh($: EngineInterface, titleOption: string): Promise<Snapshot> {
   if (inFlight) isPending = true;
-  inFlight ??= fetchCurrent($).finally(() => {
+  inFlight ??= fetchCurrent($, titleOption).finally(() => {
     inFlight = undefined;
   });
   return inFlight;
@@ -397,20 +407,20 @@ async function createdInTranscript(
  * Tracks the PRs the session created before the band loaded (a restart or
  * resume), then fetches when the session has any.
  */
-async function backfill($: EngineInterface): Promise<void> {
+async function backfill($: EngineInterface, titleOption: string): Promise<void> {
   const urls = await createdInTranscript($, await $.session.messages(), new Set());
   await track($, urls);
-  if ((await read($, created)).length > 0) void refresh($);
+  if ((await read($, created)).length > 0) void refresh($, titleOption);
 }
 
 /**
  * Refreshes once the snapshot is older than 3 minutes, while the session has
  * created PRs.
  */
-async function refreshWhenStale($: EngineInterface): Promise<void> {
+async function refreshWhenStale($: EngineInterface, titleOption: string): Promise<void> {
   const [urls, snap, now] = await Promise.all([read($, created), read($, snapshot), $.clock.now()]);
   if (urls.length === 0) return;
-  if (!snap || now - snap.fetchedAt >= STALE_MS) void refresh($);
+  if (!snap || now - snap.fetchedAt >= STALE_MS) void refresh($, titleOption);
 }
 
 /**
@@ -431,16 +441,21 @@ function findPr(snap: Snapshot | null, arg: string): Pr | undefined {
 }
 
 /**
- * Opens a URL in the host's browser: the executable `$BROWSER` names when
- * set (run with the URL, no shell); else on WSL the Windows browser
- * (explorer.exe hands the URL to the Windows default), on macOS `open`,
- * elsewhere `xdg-open`. explorer.exe exits 1 even when it worked.
+ * Opens a URL in the host's browser: the command `$BROWSER` gives when set
+ * (see `browserArgv`; no shell); else, or when that command cannot start or
+ * times out, on WSL the Windows browser (explorer.exe hands the URL to the
+ * Windows default), on macOS `open`, elsewhere `xdg-open`. explorer.exe
+ * exits 1 even when it worked.
  */
 async function openUrl($: EngineInterface, url: string): Promise<string> {
-  const browser = (await $.env.get('BROWSER'))?.trim();
-  if (browser) {
-    await $.process.run([browser, url], { timeoutMs: 10000 });
-    return 'browser';
+  const browser = browserArgv((await $.env.get('BROWSER')) ?? '', url);
+  if (browser.length > 0) {
+    try {
+      await $.process.run(browser, { timeoutMs: OPEN_TIMEOUT_MS });
+      return 'browser';
+    } catch {
+      // `$BROWSER` cannot start or timed out: the platform opener below takes over.
+    }
   }
   const kernel = await $.process.run(['uname', '-sr']);
   const os = kernel.stdout.toLowerCase();
@@ -449,7 +464,7 @@ async function openUrl($: EngineInterface, url: string): Promise<string> {
     : os.includes('microsoft')
       ? ['explorer.exe', url]
       : ['xdg-open', url];
-  await $.process.run(argv, { timeoutMs: 10000 });
+  await $.process.run(argv, { timeoutMs: OPEN_TIMEOUT_MS });
   return argv[0] === 'explorer.exe'
     ? 'Windows browser'
     : argv[0] === 'open'
@@ -480,9 +495,12 @@ function summaryOf(count: number, snap: Snapshot): string {
  * refreshes a stale snapshot; a `tool.call` observer that tracks each PR a
  * call creates or updates, in the main loop or a subagent's; the command's toggle,
  * `list`, `refresh`, `open <ref>` and `add <url>`; and the band drawn on
- * `AbovePrompt`.
+ * `AbovePrompt`. `options.task_title_cmd` is the title command option.
  */
-export const register: Register = (on) => {
+export const register: Register = (on, options) => {
+  const option = options.task_title_cmd;
+  const titleOption = typeof option === 'string' ? option.trim() : '';
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'my-pr-links',
@@ -491,8 +509,8 @@ export const register: Register = (on) => {
       argumentHint: '[list | refresh | open <ref> | add <url>]',
     });
 
-    await backfill($);
-    $.clock.every(TICK_MS, () => void refreshWhenStale($));
+    await backfill($, titleOption);
+    $.clock.every(TICK_MS, () => void refreshWhenStale($, titleOption));
 
     return next(e);
   });
@@ -500,7 +518,7 @@ export const register: Register = (on) => {
   on('tool.call', async ($, e, next) => {
     const ran = await next(e);
     const urls = trackedUrls(e.tool, e, ran.text ?? '');
-    if (urls.length > 0 && (await track($, urls))) void refresh($);
+    if (urls.length > 0 && (await track($, urls))) void refresh($, titleOption);
     return ran;
   }).catch(($, e, next) => next(e));
 
@@ -522,7 +540,7 @@ export const register: Register = (on) => {
       const urls = await read($, created);
       if (urls.length === 0)
         return { text: 'No pull requests created or updated in this session yet.' };
-      return { text: summaryOf(urls.length, await refresh($)) };
+      return { text: summaryOf(urls.length, await refresh($, titleOption)) };
     }
 
     if (verb === 'open') {
@@ -539,7 +557,7 @@ export const register: Register = (on) => {
           text: 'Usage: /my-pr-links add <url> (https://host/group/project/-/merge_requests/<n> or https://host/owner/repo/pull/<n>)',
         };
       if (!(await track($, [link.url]))) return { text: `${link.url} is already in the band.` };
-      void refresh($);
+      void refresh($, titleOption);
       return { text: `Added ${link.ref} to the band.` };
     }
 

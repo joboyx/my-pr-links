@@ -21,7 +21,6 @@ export type BandPr = {
   url: string;
   title: string;
   rowTitle: string;
-  body?: string;
   sourceBranch: string;
   targetBranch: string;
   state: 'merged' | 'ready' | 'review' | 'failing' | 'running' | 'draft' | 'closed';

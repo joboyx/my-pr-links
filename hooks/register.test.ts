@@ -41,6 +41,8 @@ const PR_88 = GITHUB_88_VIEW.url;
 // A private repo: only the `octo-user` account can read it.
 const PRIVATE_PR = 'https://github.com/octo-user/notebook/pull/12';
 const TITLE_CMD = '/opt/bin/ticket-title';
+// The title command the `task_title_cmd` option names.
+const OPTION_TITLE_CMD = '/opt/bin/option-title';
 
 /**
  * A finished MR of ticket SHOP-214 in shop-api, based on !41.
@@ -77,7 +79,9 @@ type Answer = { exitCode?: number; stdout?: string; stderr?: string } | 'missing
  * `gh pr` call (or, as `'missing'`, every `gh` call); `ghAuth` answers
  * `gh auth status`; `noToken` lists the logins whose `gh auth token` fails;
  * `views` adds `gh pr view` results by URL; `title` answers the title
- * command; `env` is the environment the plugin reads.
+ * command; `uname` is what `uname -sr` prints (a WSL kernel when unset);
+ * `missing` lists the binaries that cannot start; `env` is the environment
+ * the plugin reads.
  */
 type Hosts = {
   glab?: Answer;
@@ -86,6 +90,8 @@ type Hosts = {
   noToken?: string[];
   views?: Record<string, GithubPrView>;
   title?: Answer;
+  uname?: string;
+  missing?: string[];
   env?: Record<string, string>;
 };
 
@@ -122,7 +128,9 @@ const failed: Answer = { exitCode: 1, stderr: 'not found\n' };
  */
 function answerOf(argv: readonly string[], hosts: Hosts, env?: Record<string, string>): Answer {
   const [tool, sub, path = ''] = argv;
+  if (tool && hosts.missing?.includes(tool)) return 'missing';
   if (tool === TITLE_CMD) return hosts.title ?? { stdout: 'Checkout retries\nsecond line\n' };
+  if (tool === OPTION_TITLE_CMD) return { stdout: 'Checkout retries from the option\n' };
   if (tool === 'glab' && hosts.glab) return hosts.glab;
   if (tool === 'gh' && hosts.gh === 'missing') return 'missing';
   if (tool === 'gh' && sub === 'auth' && path === 'status')
@@ -161,7 +169,7 @@ function answerOf(argv: readonly string[], hosts: Hosts, env?: Record<string, st
     };
   }
   if (tool === 'gh') return failed;
-  if (tool === 'uname') return { stdout: 'Linux 6.6.0-microsoft-standard-WSL2\n' };
+  if (tool === 'uname') return { stdout: hosts.uname ?? 'Linux 6.6.0-microsoft-standard-WSL2\n' };
   return { exitCode: 1 };
 }
 
@@ -271,10 +279,10 @@ async function createShopApiPr($: Engine, agentId?: string): Promise<void> {
 }
 
 /**
- * The title command runs among `runs`.
+ * The title command runs among `runs`, from the env var or the option.
  */
 function titleRunsOf(runs: Run[]): Run[] {
-  return runs.filter((r) => r.argv[0] === TITLE_CMD);
+  return runs.filter((r) => r.argv[0] === TITLE_CMD || r.argv[0] === OPTION_TITLE_CMD);
 }
 
 test('a main-loop glab mr create adds the PR and the band shows it after the fetch', async ($, on) => {
@@ -489,8 +497,56 @@ test('with the title command unset, nothing runs and the header shows the key al
   expect((await ui.find({ key: 'group-ticket-SHOP-214' }))?.text).toMatch(/^SHOP-214▸ review !42/);
 });
 
+test(
+  'the task_title_cmd option wins over the env var',
+  { options: { task_title_cmd: OPTION_TITLE_CMD } },
+  async ($, on) => {
+    const { runs, clock } = hostsFor(on, { env: { MY_PR_LINKS_TASK_TITLE_CMD: TITLE_CMD } });
+    toolsFor(on);
+
+    await createShopApiPr($);
+    await clock.settle();
+
+    expect(titleRunsOf(runs)).toEqual([
+      { argv: [OPTION_TITLE_CMD, 'SHOP-214'], env: undefined, timeoutMs: 2000 },
+    ]);
+    const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+    expect((await ui.find({ key: 'group-ticket-SHOP-214' }))?.text).toMatch(
+      /^SHOP-214Checkout retries from the option▸ review !42/,
+    );
+  },
+);
+
+test(
+  'an empty task_title_cmd option falls back to the env var',
+  { options: { task_title_cmd: '  ' } },
+  async ($, on) => {
+    const { runs, clock } = hostsFor(on, { env: { MY_PR_LINKS_TASK_TITLE_CMD: TITLE_CMD } });
+    toolsFor(on);
+
+    await createShopApiPr($);
+    await clock.settle();
+
+    expect(titleRunsOf(runs).map((r) => r.argv)).toEqual([[TITLE_CMD, 'SHOP-214']]);
+  },
+);
+
+test(
+  'with an empty option and no env var, no title command runs',
+  { options: { task_title_cmd: '' } },
+  async ($, on) => {
+    const { runs, clock } = hostsFor(on);
+    toolsFor(on);
+
+    await createShopApiPr($);
+    await clock.settle();
+
+    expect(titleRunsOf(runs)).toEqual([]);
+  },
+);
+
 for (const [name, title] of [
-  ['exits non-zero', { exitCode: 1, stdout: 'Checkout retries\n', stderr: 'no such ticket\n' }],
+  ['exits non-zero',{ exitCode: 1, stdout: 'Checkout retries\n', stderr: 'no such ticket\n' }],
   ['prints nothing', { stdout: '\n  \n' }],
   ['times out', 'missing'],
 ] as const) {
@@ -780,6 +836,119 @@ test('/my-pr-links open runs $BROWSER with the URL when it is set', async ($, on
   expect(out.text).toBe('Opened shop-api !42 in browser');
   expect(ran).toContainEqual(['/usr/local/bin/web-browser', PR_42]);
   expect(ran.some((argv) => argv[0] === 'uname' || argv[0] === 'explorer.exe')).toBe(false);
+});
+
+test('$BROWSER with arguments runs as argv with the URL last', async ($, on) => {
+  const { ran, clock } = hostsFor(on, { env: { BROWSER: 'firefox --new-window' } });
+  toolsFor(on);
+  await createShopApiPr($);
+  await clock.settle();
+
+  const out = await $.command.run({ command: 'my-pr-links', args: 'open !42', ...COMPOSER });
+
+  expect(out.text).toBe('Opened shop-api !42 in browser');
+  expect(ran).toContainEqual(['firefox', '--new-window', PR_42]);
+  expect(ran.some((argv) => argv[0] === 'uname')).toBe(false);
+});
+
+test('a $BROWSER that cannot start falls back to the platform opener', async ($, on) => {
+  const { ran, clock } = hostsFor(on, {
+    env: { BROWSER: 'firefox --new-window' },
+    missing: ['firefox'],
+  });
+  toolsFor(on);
+  await createShopApiPr($);
+  await clock.settle();
+
+  const out = await $.command.run({ command: 'my-pr-links', args: 'open !42', ...COMPOSER });
+
+  expect(out.text).toBe('Opened shop-api !42 in Windows browser');
+  const opens = ran.filter((argv) => argv.includes(PR_42));
+  expect(opens).toEqual([
+    ['firefox', '--new-window', PR_42],
+    ['explorer.exe', PR_42],
+  ]);
+});
+
+for (const [os, kernel, opener, where] of [
+  ['macOS', 'Darwin 23.6.0\n', 'open', 'macOS browser'],
+  ['plain Linux', 'Linux 6.8.0-45-generic\n', 'xdg-open', 'browser'],
+] as const) {
+  test(`with $BROWSER unset, open uses ${opener} on ${os}`, async ($, on) => {
+    const { ran, clock } = hostsFor(on, { uname: kernel });
+    toolsFor(on);
+    await createShopApiPr($);
+    await clock.settle();
+
+    const out = await $.command.run({ command: 'my-pr-links', args: 'open !42', ...COMPOSER });
+
+    expect(out.text).toBe(`Opened shop-api !42 in ${where}`);
+    expect(ran).toContainEqual([opener, PR_42]);
+    expect(ran.some((argv) => argv[0] === 'explorer.exe')).toBe(false);
+  });
+}
+
+test('clicking a ref opens its URL and says which PR it was', async ($, on) => {
+  const { ran, clock } = hostsFor(on);
+  toolsFor(on);
+  const toasts: string[] = [];
+  on('ui.toast', ($, e) => {
+    toasts.push(e.text);
+    return { value: undefined };
+  });
+  await createShopApiPr($);
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  await ui.press({ key: 'link-pr-ticket-SHOP-214-gitlab-shop-api-42', link: { href: PR_42 } });
+
+  expect(ran).toContainEqual(['explorer.exe', PR_42]);
+  expect(toasts).toEqual(['⑂ opened shop-api !42 in Windows browser']);
+});
+
+test('unparseable gh and glab output shows one error line per CLI', async ($, on) => {
+  const { clock } = hostsFor(on, {
+    glab: { stdout: '<html>502 Bad Gateway</html>' },
+    gh: { stdout: 'not json' },
+  });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+  const out = await $.command.run({ command: 'my-pr-links', args: 'refresh', ...COMPOSER });
+
+  expect(out.text).toBe('2 PRs from this session · ⚠ glab: unparseable JSON · gh: unparseable JSON');
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await ui.find({ text: /⚠ glab: unparseable JSON · gh: unparseable JSON/ })).toBeDefined();
+  expect(await ui.find({ text: /\[!42\]|\[#88\]/ })).toBeUndefined();
+});
+
+test('a description trailer puts PRs from both hosts in the ticket group', async ($, on) => {
+  const mr = {
+    ...GITLAB_MR_42,
+    source_branch: 'fix/backoff',
+    title: 'back off between checkout retries',
+    description: 'Adds a backoff.\n\nRefs: SHOP-214',
+  };
+  const pr = {
+    ...GITHUB_88_VIEW,
+    headRefName: 'octo-user/retry-banner',
+    title: 'show a retry banner',
+    body: 'Shows a banner.\r\n\r\nCloses SHOP-214\r\n',
+  };
+  const { clock } = hostsFor(on, { glab: ok(mr), gh: ok(pr) });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect((await ui.find({ key: 'group-ticket-SHOP-214' }))?.text).toMatch(/\[#88\][\s\S]*\[!42\]/);
+  expect(await ui.find({ key: 'group-other-other' })).toBeUndefined();
+  const list = await $.command.run({ command: 'my-pr-links', args: 'list', ...COMPOSER });
+  expect(list.text).not.toMatch(/Adds a backoff|Shows a banner/);
 });
 
 test('/my-pr-links toggles the band', async ($) => {

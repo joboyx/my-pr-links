@@ -7,11 +7,11 @@ The plugin lives at the repo root. User docs are in `README.md`.
 
 | Path                              | Content                                                               |
 | --------------------------------- | --------------------------------------------------------------------- |
-| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, description                         |
+| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, listing fields, `userConfig`        |
 | `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`             |
 | `hooks/hooks.json`                | Hook module list                                                      |
 | `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open          |
-| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles   |
+| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, `$BROWSER` argv |
 | `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output             |
 | `hooks/*.test.ts`                 | Unit tests                                                            |
 | `types/index.d.ts`                | Types for the mod API                                                 |
@@ -24,7 +24,8 @@ Run from the repo root.
 | Task                          | Command                                  |
 | ----------------------------- | ---------------------------------------- |
 | Unit tests                    | `claude plugin test .`                   |
-| Manifest and layout check     | `claude plugin validate .`               |
+| Manifest and layout check     | `claude plugin validate . --strict`      |
+| Plugin directory check        | `claude plugin validate . --profile directory` |
 | Load this copy for a session  | `claude --plugin-dir .`                  |
 | Tag a release                 | `claude plugin tag .` (tag `my-pr-links--vX.Y.Z`) |
 
@@ -37,15 +38,17 @@ A ticket key matches `[A-Z][A-Z0-9]{1,9}-\d+`. The first rule that matches gives
 1. Branch: a key at the start of a path segment (`feature/ABC-123-retry`, `ABC-123-ui`).
 2. Conventional-commit scope is a key, also inside a scope list (`feat(ABC-123): …`, `fix(api,ABC-123): …`).
 3. Title starts with `ABC-123: ` or `[ABC-123] `. A bare `ABC-123 x` does not count.
-4. A description line `Refs|Ref|Closes|Fixes|Resolves|Issue|Ticket|Task|Jira`, then the key (`Refs: ABC-123`).
+4. A description line `Refs|Ref|Closes|Fixes|Resolves|Issue|Ticket|Task|Jira`, then the key, which ends the line or a `,`/`;` list item (`Refs: ABC-123`, `Closes ABC-1, ABC-2`). The match never crosses lines.
 5. No key, and 2 or more PRs in the band share a source branch that is not `main`, `master`, `develop`, `dev`, `trunk`, `staging` or `production`: the branch name is the key.
 
-Keys in running text never count (`UTF-8`, `SHA-256`, `CVE-…`). Lowercase keys (`eng-123`) are not supported.
+Keys in running text never count. A key whose letter part is `CVE`, `UTF`, `SHA`, `ISO`, `HTTP`, `RFC`, `TLS`, `MD` or `GHSA` never counts in any rule (`STANDARD_PREFIXES` in `hooks/prs.ts`). Lowercase keys (`eng-123`) are not supported. Only a lowercase word is a conventional-commit type.
+The description is read for rule 4 in `fromGitlab` / `fromGithub` and is not stored. A change to the stored `Pr` shape bumps the `shape` tag of the `snapshot` atom in `hooks/register.tsx`.
 Groups show first. Keyless PRs go under a bare `other` header when a group exists. With no group, the band is a plain list with no header.
 
 ## Title command contract
 
-- `MY_PR_LINKS_TASK_TITLE_CMD` holds the path to one executable.
+- The `task_title_cmd` option (`userConfig` in `plugin.json`, passed as `register(on, options)`) holds the path to one executable. When it is empty, `MY_PR_LINKS_TASK_TITLE_CMD` gives the path. When neither is set, nothing runs.
+- `claude plugin configure my-pr-links@my-pr-links` sets the option for an installed copy only; it cannot reach a `--plugin-dir` session, so use the env var there. Tests set it with `test(name, { options: { task_title_cmd } }, body)`.
 - The mod runs `<cmd> <KEY>` with no shell, once per ticket key per fetch, with a 2 s timeout and Claude Code's environment.
 - Exit 0 and a non-empty first stdout line: that line is the header title. Any other result: no title.
 - The mod never calls it for shared-branch groups (rule 5).

@@ -30,19 +30,15 @@ export type Pr = {
   ref: string;
   url: string;
   /**
-   * Full title without a leading `Draft: `.
+   * Full title without a leading draft marker such as `Draft: ` or `[WIP]`.
    */
   title: string;
   /**
    * The title as the row shows it: no draft marker, no conventional-commit
    * type, no ticket key the group header already shows, at most 50
-   * characters.
+   * characters. The full title when nothing is left after that.
    */
   rowTitle: string;
-  /**
-   * The description (GitLab) or body (GitHub), when the host returned one.
-   */
-  body?: string;
   sourceBranch: string;
   targetBranch: string;
   state: PrState;
@@ -88,6 +84,9 @@ export type PrGroup = {
    * `dependabot/npm_and_yarn/lodash-4.17.21`, or `other`.
    */
   id: string;
+  /**
+   * What the group is keyed by: a ticket key, a shared branch, or `other`.
+   */
   kind: GroupKind;
   /**
    * The header title the title command gave for a ticket key; never set for
@@ -143,6 +142,10 @@ export type PrLink = {
 export type GitlabMrItem = {
   iid: number;
   title: string;
+  /**
+   * The MR description; `null` or empty when it has none. Read for the
+   * ticket key only, never kept.
+   */
   description?: string | null;
   source_branch: string;
   target_branch: string;
@@ -191,6 +194,10 @@ export type GithubCheck = {
 export type GithubPrView = {
   number: number;
   title: string;
+  /**
+   * The PR description; empty when it has none. Read for the ticket key
+   * only, never kept.
+   */
   body?: string;
   url: string;
   isDraft: boolean;
@@ -271,25 +278,40 @@ export function nextOf(group: PrGroup): Next {
   return { kind: 'waiting', text: `review ${first.ref}` };
 }
 
+// Leading draft markers, in any case: `Draft:`, `WIP:`, `[Draft]`, `[WIP]`, `(Draft)`.
+const DRAFT_MARKER = /^(?:(?:draft:|wip:|\[draft\]|\[wip\]|\(draft\))\s*)+/i;
+
 /**
- * The title without a leading `Draft: `.
+ * The title without its leading draft markers.
  */
-const stripDraft = (title: string) => title.replace(/^Draft:\s*/i, '');
+const stripDraft = (title: string) => title.replace(DRAFT_MARKER, '');
 
 // A ticket key: 2 to 10 capitals or digits that start with a capital, a dash, a number.
 const KEY = '[A-Z][A-Z0-9]{1,9}-\\d+';
 const WHOLE_KEY = new RegExp(`^${KEY}$`);
 // Rule 1: a ticket key at the start of a branch path segment, such as `feature/SHOP-214-x`.
-const BRANCH_KEY = new RegExp(`(?:^|/)(${KEY})(?=$|[-_/.])`);
-// Rule 2: a conventional-commit title, `type(scope)!: description`, after a draft marker.
-const CONVENTIONAL = /^(?:draft:\s*|\[draft\]\s*|wip:\s*)?(\w+)(?:\(([^)]*)\))?(!)?:\s*(.*)$/i;
+const BRANCH_KEY = new RegExp(`(?:^|/)(${KEY})(?=$|[-_/.])`, 'g');
+// Rule 2: a conventional-commit title, `type(scope)!: description`; the type is a lowercase word.
+const CONVENTIONAL = /^([a-z]+)(?:\(([^)]*)\))?(!)?:\s*(.*)$/;
 // Rule 3: a ticket key that opens the description, `SHOP-214: x` or `[SHOP-214] x`.
 const LEAD_KEY = new RegExp(`^(?:\\[(${KEY})\\]|(${KEY}):)\\s`);
-// Rule 4: a footer or git trailer line, such as `Refs: SHOP-214` or `Closes #SHOP-214`.
+// Rule 4: a footer or git trailer line, such as `Refs: SHOP-214` or `Closes #SHOP-214`. The key
+// ends the line or a list item (`Closes ABC-1, ABC-2`), so `Fixes UTF-8 decoding` never matches.
 const TRAILER_KEY =
-  /^(?:refs?|closes|fixes|resolves|issue|ticket|task|jira)\s*[:#]?\s*([A-Za-z][A-Za-z0-9]*-\d+)\b/gim;
-const DRAFT_MARKER = /^(?:draft:|\[draft\]|wip:)\s*/i;
+  /^(?:refs?|closes|fixes|resolves|issue|ticket|task|jira)[ \t]*[:#]?[ \t]*([A-Za-z][A-Za-z0-9]*-\d+)(?=[ \t]*(?:\r?$|[,;]))/gim;
 const ROW_TITLE_MAX = 50;
+
+/**
+ * Prefixes of standard codes that look like ticket keys (`CVE-2024-1234`,
+ * `UTF-8`, `SHA-256`, `ISO-8601`, `HTTP-2`); they never form a key.
+ */
+const STANDARD_PREFIXES = new Set(['CVE', 'UTF', 'SHA', 'ISO', 'HTTP', 'RFC', 'TLS', 'MD', 'GHSA']);
+
+/**
+ * Whether the text is a whole ticket key, and not a standard code.
+ */
+const isKey = (text: string) =>
+  WHOLE_KEY.test(text) && !STANDARD_PREFIXES.has(text.slice(0, text.indexOf('-')));
 
 /**
  * Branches a release or integration flow shares between unrelated PRs; they
@@ -317,8 +339,9 @@ type ParsedTitle = { type?: string; scopeText?: string; scopes: string[]; desc: 
  * Splits a title as a conventional commit (see `ParsedTitle`).
  */
 function parseTitle(title: string): ParsedTitle {
-  const m = CONVENTIONAL.exec(title.trim());
-  if (!m) return { scopes: [], desc: title.trim().replace(DRAFT_MARKER, '') };
+  const text = stripDraft(title.trim());
+  const m = CONVENTIONAL.exec(text);
+  if (!m) return { scopes: [], desc: text };
   const scopeText = m[2];
   const scopes = (scopeText ?? '')
     .split(/[,/]/)
@@ -342,21 +365,23 @@ function leadKeyOf(desc: string): { key: string; text: string } | undefined {
  * source branch path segment; (2) a conventional-commit scope that is, or
  * lists, a key; (3) a key that opens the title's description as `KEY: x` or
  * `[KEY] x`; (4) a footer or trailer line of the description such as
- * `Refs: KEY`. A key inside running text (`fix UTF-8 decoding`) and a
- * lowercase key never match.
+ * `Refs: KEY`. A key inside running text (`fix UTF-8 decoding`), a
+ * lowercase key and a standard code (`CVE-2024-1234`, `ISO-8601`) never
+ * match.
  */
 export function ticketOf(sourceBranch: string, title: string, body = ''): string | undefined {
-  const fromBranch = BRANCH_KEY.exec(sourceBranch)?.[1];
-  if (fromBranch) return fromBranch;
+  for (const m of sourceBranch.matchAll(BRANCH_KEY)) {
+    if (m[1] && isKey(m[1])) return m[1];
+  }
   const parsed = parseTitle(title);
-  const fromScope = parsed.scopes.find((s) => WHOLE_KEY.test(s));
+  const fromScope = parsed.scopes.find(isKey);
   if (fromScope) return fromScope;
   const fromLead = leadKeyOf(parsed.desc)?.key;
-  if (fromLead) return fromLead;
+  if (fromLead && isKey(fromLead)) return fromLead;
   // The trailer keyword matches in any case; the key itself only in capitals.
   for (const m of body.matchAll(TRAILER_KEY)) {
     const key = m[1];
-    if (key && WHOLE_KEY.test(key)) return key;
+    if (key && isKey(key)) return key;
   }
   return undefined;
 }
@@ -366,20 +391,26 @@ export function ticketOf(sourceBranch: string, title: string, body = ''): string
  * the scope `ticket` is dropped (from a scope list, only that entry), any
  * other scope kept as `scope: description`; a leading `ticket:` or
  * `[ticket]` dropped. A title that is not a conventional commit stays as
- * written. Cut to at most 50 characters, ending in `…`.
+ * written, less its draft marker. When nothing is left, the full title less
+ * its draft marker. Cut to at most 50 code points, ending in `…`.
  */
 export function rowTitleOf(title: string, ticket?: string): string {
   const parsed = parseTitle(title);
   const lead = leadKeyOf(parsed.desc);
   const desc = lead && lead.key === ticket ? parsed.desc.slice(lead.text.length) : parsed.desc;
 
-  let text = desc;
+  let text = desc.trim();
   if (parsed.type !== undefined) {
     const rest = parsed.scopes.filter((s) => s !== ticket);
     const scope = rest.length === parsed.scopes.length ? parsed.scopeText?.trim() : rest.join(', ');
-    if (scope) text = `${scope}: ${desc}`;
+    if (scope) text = `${scope}: ${text}`;
   }
-  return text.length > ROW_TITLE_MAX ? `${text.slice(0, ROW_TITLE_MAX - 1).trimEnd()}…` : text;
+  if (!text) text = stripDraft(title.trim());
+  // Code points, so a cut never splits a surrogate pair such as an emoji.
+  const chars = Array.from(text);
+  return chars.length > ROW_TITLE_MAX
+    ? `${chars.slice(0, ROW_TITLE_MAX - 1).join('').trimEnd()}…`
+    : text;
 }
 
 const PIPELINE_RUNNING = [
@@ -440,14 +471,13 @@ export function fromGitlab(
                 ? 'ready'
                 : 'review';
 
-  const remarks: string[] = [];
-  if (mergeStatus === 'discussions_not_resolved') remarks.push('unresolved threads');
-  if (item.has_conflicts || mergeStatus === 'conflict') remarks.push('has conflicts');
+  const notes: string[] = [];
+  if (mergeStatus === 'discussions_not_resolved') notes.push('unresolved threads');
+  if (item.has_conflicts || mergeStatus === 'conflict') notes.push('has conflicts');
 
   const project = item.references.full.split('!')[0] ?? '';
   const title = stripDraft(item.title);
-  const body = item.description ?? undefined;
-  const ticket = ticketOf(item.source_branch, item.title, body);
+  const ticket = ticketOf(item.source_branch, item.title, item.description ?? '');
   return {
     provider: 'gitlab',
     repo: project.split('/').pop() ?? project,
@@ -455,14 +485,13 @@ export function fromGitlab(
     url: item.web_url,
     title,
     rowTitle: rowTitleOf(item.title, ticket),
-    body,
     sourceBranch: item.source_branch,
     targetBranch: item.target_branch,
     state,
     ci,
     approvals: gitlabApprovals(approvals),
     ticket,
-    note: remarks.length > 0 ? remarks.join(', ') : undefined,
+    note: notes.length > 0 ? notes.join(', ') : undefined,
   };
 }
 
@@ -518,8 +547,7 @@ export function fromGithub(view: GithubPrView): Pr {
 
   const projectPath = parsePrUrl(view.url)?.projectPath ?? '';
   const title = stripDraft(view.title);
-  const body = view.body || undefined;
-  const ticket = ticketOf(view.headRefName, view.title, body);
+  const ticket = ticketOf(view.headRefName, view.title, view.body ?? '');
   return {
     provider: 'github',
     repo: projectPath.split('/').pop() ?? projectPath,
@@ -527,7 +555,6 @@ export function fromGithub(view: GithubPrView): Pr {
     url: view.url,
     title,
     rowTitle: rowTitleOf(view.title, ticket),
-    body,
     sourceBranch: view.headRefName,
     targetBranch: view.baseRefName,
     state,
@@ -931,4 +958,18 @@ export function trackedUrls(toolName: string, input: object, resultText: string)
   if (kind === 'cli') return prUrlsIn(resultText);
   if (kind === 'api') return prUrlsInResponse(resultText);
   return [];
+}
+
+/**
+ * The argv that `$BROWSER` gives for a URL, in its common form: the first
+ * entry of a `:`-separated list, split on whitespace, with each `%s`
+ * replaced by the URL, else the URL appended. Empty when `$BROWSER` names
+ * no command.
+ */
+export function browserArgv(browser: string, url: string): string[] {
+  const words = (browser.split(':')[0] ?? '').trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
+  return words.some((w) => w.includes('%s'))
+    ? words.map((w) => w.replaceAll('%s', url))
+    : [...words, url];
 }

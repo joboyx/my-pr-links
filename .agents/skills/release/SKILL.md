@@ -38,10 +38,11 @@ Set the new `version` in `.claude-plugin/plugin.json`. If the plugin entry in `.
 
 ```sh
 claude plugin test .
-claude plugin validate .
+claude plugin validate . --strict
+claude plugin validate . --profile directory
 ```
 
-Both must exit 0.
+All three must exit 0. `--strict` fails on any warning, such as an unknown manifest field. `--profile directory` fails when the plugin directory would refuse the submission. It also prints directory warnings, such as a missing icon; report them to the owner, but they do not block the release.
 
 ## 4. Verify
 

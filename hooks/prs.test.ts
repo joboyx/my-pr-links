@@ -13,6 +13,7 @@ import {
 } from './fixtures';
 import type { GitlabMr } from './fixtures';
 import {
+  browserArgv,
   buildGroups,
   fromGithub,
   fromGitlab,
@@ -213,7 +214,6 @@ test('GitLab MR with pipeline and approvals is ready with CI pass and 1/1', () =
     url: GITLAB_MR_41.web_url,
     title: 'feat(SHOP-214): add retry to the checkout client',
     rowTitle: 'add retry to the checkout client',
-    body: 'Retries a failed checkout call up to 3 times.',
     sourceBranch: 'feature/SHOP-214-checkout-retry',
     targetBranch: 'main',
     state: 'ready',
@@ -237,7 +237,6 @@ test('GitLab MRs group under one ticket, !42 stacked on !41, !17 draft', () => {
   expect(stacked.stackedOn).toBe('!41');
   expect(stacked.note).toBe('unresolved threads');
   expect(stacked.state).toBe('review');
-  expect(stacked.body).toBeUndefined();
   expect(byRef(group.prs, '!41').stackedOn).toBeUndefined();
 
   const draft = byRef(group.prs, '!17');
@@ -314,13 +313,49 @@ test('rule 4: a trailer line of the description', () => {
   expect(ticketOf('fix/retry', 'add retry', 'See WEB-7 for the background.')).toBeUndefined();
   expect(ticketOf('fix/retry', 'add retry', 'Refs: web-7')).toBeUndefined();
 
-  // The description reaches the rule from both hosts.
+  // The description reaches the rule from both hosts, and is not kept on the PR.
   const gitlabPr = fromGitlab(
     gitlabItem({ source_branch: 'fix/retry', title: 'add retry', description: 'Refs: WEB-7' }),
   );
   const githubPr = fromGithub(githubView({ headRefName: 'fix/retry', body: 'Resolves: WEB-7' }));
-  expect([gitlabPr.ticket, gitlabPr.body]).toEqual(['WEB-7', 'Refs: WEB-7']);
-  expect([githubPr.ticket, githubPr.body]).toEqual(['WEB-7', 'Resolves: WEB-7']);
+  expect(gitlabPr.ticket).toBe('WEB-7');
+  expect(githubPr.ticket).toBe('WEB-7');
+  expect('body' in gitlabPr || 'description' in gitlabPr).toBe(false);
+  expect('body' in githubPr).toBe(false);
+});
+
+test('rule 4: the trailer key ends its line or a list item, and never crosses lines', () => {
+  expect(ticketOf('fix/x', 'x', 'Fixes UTF-8 decoding')).toBeUndefined();
+  expect(ticketOf('fix/x', 'x', 'Fixes HTTP-2 push')).toBeUndefined();
+  expect(ticketOf('fix/x', 'x', 'Refs: SHOP-214')).toBe('SHOP-214');
+  expect(ticketOf('fix/x', 'x', 'Closes ABC-1, ABC-2')).toBe('ABC-1');
+  expect(ticketOf('fix/x', 'x', 'Closes ABC-1; ABC-2')).toBe('ABC-1');
+  expect(ticketOf('fix/x', 'x', 'Task\n\nUTF-8 cleanup')).toBeUndefined();
+  expect(ticketOf('fix/x', 'x', 'Task\nSHOP-214')).toBeUndefined();
+  // A GitHub body from the web editor has CRLF line ends.
+  expect(ticketOf('fix/x', 'x', 'Adds retry.\r\n\r\nRefs: SHOP-214\r\n')).toBe('SHOP-214');
+});
+
+test('standard codes never form a key, in any rule', () => {
+  for (const branch of [
+    'fix/CVE-2024-1234',
+    'feature/ISO-8601-dates',
+    'fix/UTF-8-decoding',
+    'fix/HTTP-2-push',
+    'chore/SHA-256-checksums',
+    'fix/GHSA-1234-abcd',
+  ]) {
+    expect(ticketOf(branch, 'x')).toBeUndefined();
+  }
+  // A real key later in the branch still counts.
+  expect(ticketOf('fix/CVE-2024-1234/SHOP-214-patch', 'x')).toBe('SHOP-214');
+
+  expect(ticketOf('fix/x', 'fix(CVE-2024-1234): patch the parser')).toBeUndefined();
+  expect(ticketOf('fix/x', 'fix(RFC-7231, SHOP-214): x')).toBe('SHOP-214');
+  expect(ticketOf('fix/x', 'TLS-13: drop old ciphers')).toBeUndefined();
+  expect(ticketOf('fix/x', '[MD-5] drop the hash')).toBeUndefined();
+  expect(ticketOf('fix/x', 'x', 'Fixes CVE-2024-1234')).toBeUndefined();
+  expect(ticketOf('fix/x', 'x', 'Refs: RFC-9110')).toBeUndefined();
 });
 
 test('the first rule that matches wins: branch, then scope, then title start, then trailer', () => {
@@ -425,6 +460,45 @@ test('the row title keeps an area scope, the rest of a scope list and other keys
   );
 });
 
+test('every draft marker leaves the row title and the full title, in any case', () => {
+  for (const marker of ['[WIP]', '(Draft)', '[Draft]', 'Draft:', 'WIP:', 'wip:', '[wip]', 'DRAFT:']) {
+    expect(rowTitleOf(`${marker} feat(SHOP-214): add retry`, 'SHOP-214')).toBe('add retry');
+    expect(rowTitleOf(`${marker} tidy imports`)).toBe('tidy imports');
+    const pr = fromGitlab(gitlabItem({ title: `${marker} feat(SHOP-214): add retry` }));
+    expect(pr.title).toBe('feat(SHOP-214): add retry');
+    const gh = fromGithub(githubView({ title: `${marker} tidy imports` }));
+    expect(gh.title).toBe('tidy imports');
+  }
+  expect(ticketOf('fix/x', '[WIP] feat(SHOP-214): add retry')).toBe('SHOP-214');
+  expect(ticketOf('fix/x', '(Draft) SHOP-214: add retry')).toBe('SHOP-214');
+});
+
+test('only a lowercase word is a conventional-commit type', () => {
+  expect(rowTitleOf('Payments: retry 503s')).toBe('Payments: retry 503s');
+  expect(rowTitleOf('Re: x')).toBe('Re: x');
+  expect(rowTitleOf('Release: v1.2')).toBe('Release: v1.2');
+  expect(rowTitleOf('FIX(api): x')).toBe('FIX(api): x');
+  expect(rowTitleOf('fix: x')).toBe('x');
+  expect(ticketOf('fix/x', 'Feat(SHOP-214): x')).toBeUndefined();
+});
+
+test('a row title with nothing left after the cleanup falls back to the full title', () => {
+  expect(rowTitleOf('feat(SHOP-214): ', 'SHOP-214')).toBe('feat(SHOP-214):');
+  const pr = fromGitlab(gitlabItem({ title: 'Draft: feat(SHOP-214):' }));
+  expect([pr.ticket, pr.rowTitle]).toEqual(['SHOP-214', 'feat(SHOP-214):']);
+});
+
+test('the row title cut never splits an emoji', () => {
+  const title = `${'x'.repeat(48)}🚀yyyy`;
+  const cut = rowTitleOf(title);
+
+  expect(cut).toBe(`${'x'.repeat(48)}🚀…`);
+  expect(Array.from(cut)).toHaveLength(50);
+  // Old UTF-16 cut would leave a lone high surrogate before the ellipsis.
+  expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cut)).toBe(false);
+  expect(rowTitleOf(`${'x'.repeat(49)}🚀`)).toBe(`${'x'.repeat(49)}🚀`);
+});
+
 test('the row title is cut to 50 characters with an ellipsis', () => {
   const long = 'Add a very long description that keeps going well past the limit';
   const cut = rowTitleOf(long);
@@ -445,7 +519,6 @@ test('a gh pr view result alone maps to a draft PR, its repo from the URL', () =
     url: PR_88,
     title: 'chore(ci): add a docs build workflow',
     rowTitle: 'ci: add a docs build workflow',
-    body: 'Builds the docs site on every push.',
     sourceBranch: 'octo-user/docs-build',
     targetBranch: 'main',
     state: 'draft',
@@ -928,6 +1001,17 @@ test('a mixed ticket keeps its merged and closed PRs beside the open one; a merg
     '!71 closed',
   ]);
   expect(done?.prs.map((m) => m.ref)).toEqual(['#88', '!12']);
+});
+
+test('browserArgv takes the first $BROWSER entry, split into argv, with %s or the URL last', () => {
+  const url = PR_88;
+
+  expect(browserArgv('firefox --new-window', url)).toEqual(['firefox', '--new-window', url]);
+  expect(browserArgv('  /usr/bin/web-browser  ', url)).toEqual(['/usr/bin/web-browser', url]);
+  expect(browserArgv('chromium --app=%s:firefox', url)).toEqual(['chromium', `--app=${url}`]);
+  expect(browserArgv('opener %s --raise', url)).toEqual(['opener', url, '--raise']);
+  expect(browserArgv('', url)).toEqual([]);
+  expect(browserArgv(' :firefox', url)).toEqual([]);
 });
 
 const FETCHED_AT = Date.UTC(2026, 0, 15, 4, 0, 0);
