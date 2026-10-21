@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing';
-import type { Engine, MockClock } from 'claude-code/testing';
+import type { Engine, FoundElement, MockClock } from 'claude-code/testing';
 import type { On, SessionMessage } from 'claude-code';
 
 import {
@@ -629,6 +629,76 @@ test('a long row title is cut to 50 characters; its hover detail keeps the full 
   expect(row?.props).toMatchObject({ wrap: 'truncate-end' });
   const detail = await ui.find({ key: 'd-pr-ticket-SHOP-214-gitlab-shop-api-42' });
   expect(detail?.text).toContain(long);
+});
+
+/**
+ * The width and shrink of every row's title and state cells, by row key.
+ */
+async function columnsOf(ui: { findAll: (q: { type: string }) => Promise<FoundElement[]> }) {
+  const boxes = await ui.findAll({ type: 'Box' });
+  const cells = (prefix: string) =>
+    boxes
+      .filter((b) => b.key?.startsWith(prefix))
+      .map((b) => ({
+        row: b.key!.slice(prefix.length),
+        width: b.props.width,
+        shrink: b.props.flexShrink,
+      }));
+  return { titles: cells('title-'), states: cells('state-') };
+}
+
+test('a stacked row keeps the title and state widths of the other rows, grouped or plain', async ($, on) => {
+  // A plain list: #90 is stacked on #88; neither has a ticket key.
+  const base = { ...GITHUB_88_VIEW, isDraft: false, mergeStateStatus: 'CLEAN' };
+  const stacked = {
+    ...base,
+    number: 90,
+    title: 'cache the docs build',
+    headRefName: 'octo-user/docs-cache',
+    baseRefName: base.headRefName,
+    url: 'https://github.com/octo-org/docs/pull/90',
+  };
+  const { clock } = hostsFor(on, { views: { [base.url]: base, [stacked.url]: stacked } });
+  toolsFor(on);
+  const add = (url: string) =>
+    $.command.run({ command: 'my-pr-links', args: `add ${url}`, ...COMPOSER });
+
+  await add(base.url);
+  await add(stacked.url);
+  await clock.settle();
+
+  const plain = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await plain.find({ type: 'Text', text: '⧗ after #88' })).toBeDefined();
+  const list = await columnsOf(plain);
+  expect(list.titles.map((c) => c.row)).toEqual([
+    'pr-other-other-github-docs-88',
+    'pr-other-other-github-docs-90',
+  ]);
+  // Both rows: the longest title, and one state width that holds #88's age and #90's ⧗ mark.
+  const titleWidth = 'ci: add a docs build workflow'.length;
+  const stateWidth = Math.max(
+    'ready to merge · just now'.length,
+    'ready to merge  ⧗ after #88'.length,
+  );
+  for (const c of list.titles) expect(c).toMatchObject({ width: titleWidth, shrink: 1 });
+  for (const c of list.states) expect(c).toMatchObject({ width: stateWidth, shrink: 0 });
+
+  // A ticket group: !42 is stacked on !41 and has a note; the note only fills the room left.
+  await createShopApiPr($);
+  await add(GITLAB_MR_41.web_url);
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await ui.find({ type: 'Text', text: '⧗ after !41' })).toBeDefined();
+  const grid = await columnsOf(ui);
+  expect(grid.titles.length).toBe(4);
+  expect(new Set(grid.titles.map((c) => `${c.width}/${c.shrink}`)).size).toBe(1);
+  expect(new Set(grid.states.map((c) => `${c.width}/${c.shrink}`))).toEqual(
+    new Set([`${'ready to merge  ⧗ after #88'.length}/0`]),
+  );
+  const note = await ui.find({ key: 'note-pr-ticket-SHOP-214-gitlab-shop-api-42' });
+  expect(note?.text).toBe('· unresolved threads');
+  expect(note?.props).toMatchObject({ width: 0, flexGrow: 1 });
 });
 
 test('a ready GitHub PR nobody approved shows 👍 0 in the warning color', async ($, on) => {

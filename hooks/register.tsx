@@ -745,6 +745,23 @@ export const register: Register = (on, options) => {
       0,
       ...rowPrs.map((m) => (m.approvals ? m.approvals.length + 3 : 0)),
     );
+    // A plain list shows the age on its first row; a list with headers, on the first header.
+    const ageRow = headed ? undefined : rowPrs[0];
+    const stackMarkOf = (m: Pr) => (m.stackedOn ? `⧗ after ${m.stackedOn}` : '');
+    // The state column (label, age, ⧗ mark) has one width on every row, and the note
+    // only takes the room left over, so neither cuts one row's title shorter than
+    // another's: the title, CI, approvals and state columns line up on every row.
+    const stateWidth = Math.max(
+      0,
+      ...rowPrs.map((m) => {
+        const mark = stackMarkOf(m);
+        return (
+          LOOK[m.state].label.length +
+          (m === ageRow ? ` · ${age}`.length : 0) +
+          (mark ? mark.length + 2 : 0)
+        );
+      }),
+    );
 
     const scopeOf = (group: PrGroup, m: Pr) =>
       `pr-${group.kind}-${group.id}-${m.provider}-${m.repo}-${m.ref.slice(1)}`;
@@ -781,7 +798,7 @@ export const register: Register = (on, options) => {
           <Box width={repoWidth} flexShrink={0}>
             <Text dimColor>{m.repo}</Text>
           </Box>
-          <Box width={titleWidth} flexShrink={1}>
+          <Box key={`title-${scope}`} width={titleWidth} flexShrink={1}>
             <Text wrap="truncate-end" dimColor={isClosed} hover={{ scope, inverse: true }}>
               {m.rowTitle}
             </Text>
@@ -804,19 +821,24 @@ export const register: Register = (on, options) => {
               )}
             </Box>
           )}
-          <Box flexShrink={0}>
-            <Text color={look.color}>{look.label}</Text>
-            {ageText(showsAge)}
-          </Box>
-          {m.stackedOn ? (
+          <Box key={`state-${scope}`} width={stateWidth} flexShrink={0} gap={2}>
             <Box flexShrink={0}>
-              <Text color="warning">⧗ after {m.stackedOn}</Text>
+              <Text color={look.color}>{look.label}</Text>
+              {ageText(showsAge)}
             </Box>
-          ) : null}
+            {m.stackedOn ? (
+              <Box flexShrink={0}>
+                <Text color="warning">{stackMarkOf(m)}</Text>
+              </Box>
+            ) : null}
+          </Box>
           {m.note && showsNote ? (
-            <Text italic color="warning" wrap="truncate-end">
-              · {m.note}
-            </Text>
+            // Width 0 and a grow: the note fills the room left and never shrinks the title.
+            <Box key={`note-${scope}`} width={0} flexGrow={1}>
+              <Text italic color="warning" wrap="truncate-end">
+                · {m.note}
+              </Text>
+            </Box>
           ) : null}
         </Box>
       );

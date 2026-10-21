@@ -21,7 +21,7 @@ A Claude Code mod that shows the pull requests of your session in a band above t
 
 With no ticket key in any PR, the band is a plain list with no headers. Here three PRs form a stack:
 
-![A plain list of five cli/cli PRs with no group headers. Three are ready to merge, and #14451 and #14452 show "⧗ after #14450" and "⧗ after #14451" because they are stacked. One PR is in review and one has a failed CI run.](docs/images/plain-list.png)
+![A plain list of five cli/cli PRs with no group headers. #14451 and #14452 are ready to merge and show "⧗ after #14450" and "⧗ after #14451" because they are stacked. One PR is in review and two have a failed CI run. The title, CI, approval and state columns line up on every row.](docs/images/plain-list.png)
 
 `/my-pr-links list` prints every PR of the last fetch with its full title and a link:
 
@@ -53,6 +53,17 @@ From a local clone, for one session:
 
 ```sh
 claude --plugin-dir path/to/my-pr-links
+```
+
+For a whole team, commit this to the repo's `.claude/settings.json`. Everyone who opens the repo and trusts the folder gets the band, with no install step:
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "my-pr-links": { "source": { "source": "github", "repo": "joboyx/my-pr-links" } }
+  },
+  "enabledPlugins": { "my-pr-links@my-pr-links": true }
+}
 ```
 
 Third-party marketplaces do not auto-update by default. Turn it on in `/plugin` → Marketplaces, or run `claude plugin update my-pr-links@my-pr-links`.
