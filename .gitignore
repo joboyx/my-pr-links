@@ -1,0 +1,9 @@
+node_modules/
+.DS_Store
+*.log
+
+# Keep these even when a global ignore file drops them.
+!AGENTS.md
+!CLAUDE.md
+!.claude/
+!.claude-plugin/

@@ -1,0 +1,64 @@
+# AGENTS.md
+
+`my-pr-links` is a Claude Code mod. It draws a band above the prompt that lists the pull requests (GitHub PRs via `gh`, GitLab merge requests via `glab`) that the session and its subagents created or updated.
+The plugin lives at the repo root. User docs are in `README.md`.
+
+## Layout
+
+| Path                              | Content                                                               |
+| --------------------------------- | --------------------------------------------------------------------- |
+| `.claude-plugin/plugin.json`      | Plugin manifest: name, `version`, description                         |
+| `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`             |
+| `hooks/hooks.json`                | Hook module list                                                      |
+| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open          |
+| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles   |
+| `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output             |
+| `hooks/*.test.ts`                 | Unit tests                                                            |
+| `types/index.d.ts`                | Types for the mod API                                                 |
+| `.agents/skills/`                 | Repo skills `verify` and `release` (`.claude/skills` links here)      |
+
+## Commands
+
+Run from the repo root.
+
+| Task                          | Command                                  |
+| ----------------------------- | ---------------------------------------- |
+| Unit tests                    | `claude plugin test .`                   |
+| Manifest and layout check     | `claude plugin validate .`               |
+| Load this copy for a session  | `claude --plugin-dir .`                  |
+| Tag a release                 | `claude plugin tag .` (tag `my-pr-links--vX.Y.Z`) |
+
+After a code change in a running session, run `/reload-plugins`, or restart `claude`.
+
+## Group keys
+
+A ticket key matches `[A-Z][A-Z0-9]{1,9}-\d+`. The first rule that matches gives the group key:
+
+1. Branch: a key at the start of a path segment (`feature/ABC-123-retry`, `ABC-123-ui`).
+2. Conventional-commit scope is a key, also inside a scope list (`feat(ABC-123): …`, `fix(api,ABC-123): …`).
+3. Title starts with `ABC-123: ` or `[ABC-123] `. A bare `ABC-123 x` does not count.
+4. A description line `Refs|Ref|Closes|Fixes|Resolves|Issue|Ticket|Task|Jira`, then the key (`Refs: ABC-123`).
+5. No key, and 2 or more PRs in the band share a source branch that is not `main`, `master`, `develop`, `dev`, `trunk`, `staging` or `production`: the branch name is the key.
+
+Keys in running text never count (`UTF-8`, `SHA-256`, `CVE-…`). Lowercase keys (`eng-123`) are not supported.
+Groups show first. Keyless PRs go under a bare `other` header when a group exists. With no group, the band is a plain list with no header.
+
+## Title command contract
+
+- `MY_PR_LINKS_TASK_TITLE_CMD` holds the path to one executable.
+- The mod runs `<cmd> <KEY>` with no shell, once per ticket key per fetch, with a 2 s timeout and Claude Code's environment.
+- Exit 0 and a non-empty first stdout line: that line is the header title. Any other result: no title.
+- The mod never calls it for shared-branch groups (rule 5).
+
+## Rules
+
+- Use made-up names only in examples, fixtures, tests and docs: orgs `acme`, `octo-org`; repos `acme/shop-api`, `acme/web`; users `octo-user`; keys `SHOP-214`, `ABC-123`. Never paste real API output, real org, repo or ticket names, or real user logins. The one exception: the `verify` skill adds public PRs of well-known open-source repos at run time.
+- Keep the plugin free of one team's conventions. Behaviour that fits only one setup goes behind a generic extension point, such as the title command.
+- Fixtures mirror the real JSON shape of `gh pr view --json` and `glab api`: same field names, same nesting.
+- Pure logic goes in `hooks/prs.ts` with unit tests. `hooks/register.tsx` holds only the wiring to Claude Code.
+- Every exported function, type and constant has a JSDoc block.
+
+## Skills
+
+- `verify` (`.agents/skills/verify/SKILL.md`): drive a real session with this copy loaded and capture proof per scenario. Run it after a behaviour change.
+- `release` (`.agents/skills/release/SKILL.md`): bump the version, test, verify, commit, tag, push on the owner's yes.
