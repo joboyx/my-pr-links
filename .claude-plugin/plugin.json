@@ -1,7 +1,7 @@
 {
   "name": "my-pr-links",
   "displayName": "PR links",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Band above the prompt with the pull requests (GitHub PRs and GitLab merge requests) this session and its subagents created or updated, grouped by ticket key or shared branch, with the next action; click a ref to open it in the browser.",
   "author": {
     "name": "Joboy Jordan"
