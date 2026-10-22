@@ -401,8 +401,9 @@ function trailerKeyOf(list: string): string | undefined {
 
 /**
  * The row text of a title: no draft marker and no conventional-commit type;
- * the scope `ticket` is dropped (from a scope list, only that entry), any
- * other scope kept as `scope: description`; a leading `ticket:` or
+ * the scope `ticket` is dropped (from a scope list that holds `ticket`,
+ * every key entry, as the other keys are co-tickets), any other scope kept
+ * as `scope: description`; a leading `ticket:` or
  * `[ticket]` dropped. A title that is not a conventional commit stays as
  * written, less its draft marker. When nothing is left, the full title less
  * its draft marker. Cut to at most 50 code points, ending in `…`.
@@ -414,7 +415,9 @@ export function rowTitleOf(title: string, ticket?: string): string {
 
   let text = desc.trim();
   if (parsed.type !== undefined) {
-    const rest = parsed.scopes.filter((s) => s !== ticket);
+    // Other keys beside the group key are co-tickets of the same work.
+    const hasTicket = ticket !== undefined && parsed.scopes.includes(ticket);
+    const rest = hasTicket ? parsed.scopes.filter((s) => !isKey(s)) : parsed.scopes;
     const scope = rest.length === parsed.scopes.length ? parsed.scopeText?.trim() : rest.join(', ');
     if (scope) text = `${scope}: ${text}`;
   }

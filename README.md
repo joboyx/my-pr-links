@@ -121,7 +121,7 @@ Keys in running text never count. Standard codes never count in any rule: keys t
 
 Groups show first. PRs with no key go under `other` when a group exists. With no group, the band is a plain list with no header.
 
-A row shows the PR title without a draft marker (`Draft:`, `WIP:`, `[Draft]`, `[WIP]`, `(Draft)`), the commit type and the group's own key. Only a lowercase word is a commit type, so `Release: v1.2` stays as written. An area scope stays as `scope: desc`. When nothing is left, the row shows the full title. Rows are cut at 50 characters with `…`.
+A row shows the PR title without a draft marker (`Draft:`, `WIP:`, `[Draft]`, `[WIP]`, `(Draft)`), the commit type and the group's own key. Only a lowercase word is a commit type, so `Release: v1.2` stays as written. An area scope stays as `scope: desc`. When a scope list holds the group's key, the row also drops the other keys in it (`fix(ABC-123,ABC-124): x` shows `x`). When nothing is left, the row shows the full title. Rows are cut at 50 characters with `…`.
 
 ## Stacked PRs
 

@@ -472,6 +472,21 @@ test('the row title keeps an area scope, the rest of a scope list and other keys
   );
   expect(rowTitleOf('feat(SHOP-198): x', 'SHOP-214')).toBe('SHOP-198: x');
   expect(rowTitleOf('SHOP-198: add retry', 'SHOP-214')).toBe('SHOP-198: add retry');
+});
+
+test('the row title drops co-ticket keys from a scope list that holds the group key', () => {
+  expect(rowTitleOf('fix(SHOP-214,SHOP-215): handle timeouts', 'SHOP-214')).toBe(
+    'handle timeouts',
+  );
+  expect(rowTitleOf('fix(SHOP-215, SHOP-214): handle timeouts', 'SHOP-214')).toBe(
+    'handle timeouts',
+  );
+  expect(rowTitleOf('fix(SHOP-214,SHOP-215,api): handle timeouts', 'SHOP-214')).toBe(
+    'api: handle timeouts',
+  );
+  expect(rowTitleOf('fix(SHOP-198,SHOP-215): handle timeouts', 'SHOP-214')).toBe(
+    'SHOP-198,SHOP-215: handle timeouts',
+  );
   expect(rowTitleOf('Bump lodash from 4.17.20 to 4.17.21')).toBe(
     'Bump lodash from 4.17.20 to 4.17.21',
   );
