@@ -1242,7 +1242,9 @@ test('hoverScopeOf gives a long row identity a short pr- hash scope', () => {
     expect(identity.length).toBeGreaterThan(64);
     expect(hoverScopeOf(identity)).toMatch(/^pr-[0-9a-f]{8}$/);
   }
-  expect(hoverScopeOf('')).toMatch(/^pr-[0-9a-f]{8}$/);
+  // Standard 32-bit FNV-1a test vectors.
+  expect(hoverScopeOf('')).toBe('pr-811c9dc5');
+  expect(hoverScopeOf('foobar')).toBe('pr-bf9cf968');
 });
 
 test('hoverScopeOf gives the same scope for the same row and different scopes for different rows', () => {
