@@ -17,6 +17,7 @@ import {
   fromGithub,
   fromGitlab,
   hasHeaders,
+  hoverScopeOf,
   isFinished,
   isReadyUnapproved,
   listText,
@@ -763,12 +764,13 @@ export const register: Register = (on, options) => {
       }),
     );
 
-    const scopeOf = (group: PrGroup, m: Pr) =>
+    // The full row identity keys React elements; the hover scope is its short hash (1 to 64 chars).
+    const rowIdOf = (group: PrGroup, m: Pr) =>
       `pr-${group.kind}-${group.id}-${m.provider}-${m.repo}-${m.ref.slice(1)}`;
 
     const prRow = (group: PrGroup, m: Pr, showsAge: boolean) => {
       const look = LOOK[m.state];
-      const scope = scopeOf(group, m);
+      const rowId = rowIdOf(group, m);
       const ci = m.ci ? CI_TEXT[m.ci] : '';
       // A closed row is dim except its icon and label; a finished row hides its stale note.
       const isClosed = m.state === 'closed';
@@ -783,12 +785,12 @@ export const register: Register = (on, options) => {
       // A CI cell with a page opens it on a press, in the cell's own color.
       const ciUrl = ci ? m.ciUrl : undefined;
       return (
-        <Box key={scope} gap={2} paddingLeft={headed ? 2 : 0}>
+        <Box key={rowId} gap={2} paddingLeft={headed ? 2 : 0}>
           <Box gap={1} flexShrink={0}>
             <Text color={look.color}>{look.icon}</Text>
             <Box width={refWidth} flexShrink={0}>
               <Markdown
-                key={`link-${scope}`}
+                key={`link-${rowId}`}
                 dimColor={isClosed}
                 text={`[${m.ref}](${m.url})`}
                 onLinkPress={(link) => void openPr($, link.href)}
@@ -798,14 +800,18 @@ export const register: Register = (on, options) => {
           <Box width={repoWidth} flexShrink={0}>
             <Text dimColor>{m.repo}</Text>
           </Box>
-          <Box key={`title-${scope}`} width={titleWidth} flexShrink={1}>
-            <Text wrap="truncate-end" dimColor={isClosed} hover={{ scope, inverse: true }}>
+          <Box key={`title-${rowId}`} width={titleWidth} flexShrink={1}>
+            <Text
+              wrap="truncate-end"
+              dimColor={isClosed}
+              hover={{ scope: hoverScopeOf(rowId), inverse: true }}
+            >
               {m.rowTitle}
             </Text>
           </Box>
           <Box width={4} flexShrink={0}>
             {ciUrl ? (
-              <Button key={`ci-${scope}`} plain onPress={() => void openCi($, m, ciUrl)}>
+              <Button key={`ci-${rowId}`} plain onPress={() => void openCi($, m, ciUrl)}>
                 {ciCell}
               </Button>
             ) : (
@@ -821,7 +827,7 @@ export const register: Register = (on, options) => {
               )}
             </Box>
           )}
-          <Box key={`state-${scope}`} width={stateWidth} flexShrink={0} gap={2}>
+          <Box key={`state-${rowId}`} width={stateWidth} flexShrink={0} gap={2}>
             <Box flexShrink={0}>
               <Text color={look.color}>{look.label}</Text>
               {ageText(showsAge)}
@@ -834,7 +840,7 @@ export const register: Register = (on, options) => {
           </Box>
           {m.note && showsNote ? (
             // Width 0 and a grow: the note fills the room left and never shrinks the title.
-            <Box key={`note-${scope}`} width={0} flexGrow={1}>
+            <Box key={`note-${rowId}`} width={0} flexGrow={1}>
               <Text italic color="warning" wrap="truncate-end">
                 · {m.note}
               </Text>
@@ -845,9 +851,14 @@ export const register: Register = (on, options) => {
     };
 
     const detail = (group: PrGroup, m: Pr) => {
-      const scope = scopeOf(group, m);
+      const rowId = rowIdOf(group, m);
       return (
-        <Box key={`d-${scope}`} display="none" hover={{ scope, display: 'flex' }} gap={1}>
+        <Box
+          key={`d-${rowId}`}
+          display="none"
+          hover={{ scope: hoverScopeOf(rowId), display: 'flex' }}
+          gap={1}
+        >
           <Text color="claude">›</Text>
           <Text bold>
             {m.repo} {m.ref}

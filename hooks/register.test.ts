@@ -1361,6 +1361,31 @@ test('a description trailer puts PRs from both hosts in the ticket group', async
   expect(list.text).not.toMatch(/Adds a backoff|Shows a banner/);
 });
 
+test('a ticket PR in a long repo name still draws its row and hover detail', async ($, on) => {
+  const pr = {
+    ...GITHUB_88_VIEW,
+    number: 198,
+    title: 'feat(SHOP-214): retry the storefront checkout',
+    headRefName: 'feature/SHOP-214-storefront-retry',
+    url: 'https://github.com/acme/shop-api-storefront-checkout-service-v2/pull/198',
+  };
+  const { clock } = hostsFor(on, { views: { [pr.url]: pr } });
+  toolsFor(on);
+
+  await $.command.run({ command: 'my-pr-links', args: `add ${pr.url}`, ...COMPOSER });
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  const rowId = 'pr-ticket-SHOP-214-github-shop-api-storefront-checkout-service-v2-198';
+  expect(rowId.length).toBeGreaterThan(64);
+  expect((await ui.find({ key: 'group-ticket-SHOP-214' }))?.text).toMatch(/\[#198\]/);
+  expect(await ui.find({ type: 'Text', text: 'retry the storefront checkout' })).toBeDefined();
+  // The engine refuses the whole band when a hover scope is past 64 characters.
+  expect((await ui.find({ key: `d-${rowId}` }))?.text).toContain(
+    'shop-api-storefront-checkout-service-v2 #198',
+  );
+});
+
 test('/my-pr-links toggles the band', async ($) => {
   const hid = await $.command.run({ command: 'my-pr-links', args: '', ...COMPOSER });
   expect(hid.text).toContain('hidden');
