@@ -18,6 +18,7 @@ import {
   fromGithub,
   fromGitlab,
   hasHeaders,
+  hoverScopeOf,
   isReadyUnapproved,
   listText,
   nextOf,
@@ -1228,5 +1229,27 @@ test('listText of a fresh snapshot with only errors says so, fetched just now', 
   );
   expect(listText({ fetchedAt: FETCHED_AT, groups: [], errors: [] }, FETCHED_AT)).toBe(
     'No pull requests in the snapshot · fetched just now',
+  );
+});
+
+// Row identities past the 64-character hover scope limit of Claude Code.
+const LONG_TICKET_ROW = 'pr-ticket-SHOP-214-github-shop-api-storefront-checkout-service-v2-198';
+const LONG_BRANCH_ROW =
+  'pr-branch-octo-user/add-exponential-backoff-to-every-checkout-call-gitlab-shop-api-42';
+
+test('hoverScopeOf gives a long row identity a short pr- hash scope', () => {
+  for (const identity of [LONG_TICKET_ROW, LONG_BRANCH_ROW]) {
+    expect(identity.length).toBeGreaterThan(64);
+    expect(hoverScopeOf(identity)).toMatch(/^pr-[0-9a-f]{8}$/);
+  }
+  expect(hoverScopeOf('')).toMatch(/^pr-[0-9a-f]{8}$/);
+});
+
+test('hoverScopeOf gives the same scope for the same row and different scopes for different rows', () => {
+  expect(hoverScopeOf(LONG_TICKET_ROW)).toBe(hoverScopeOf(LONG_TICKET_ROW));
+  expect(hoverScopeOf(LONG_TICKET_ROW)).not.toBe(hoverScopeOf(LONG_BRANCH_ROW));
+  // Rows that differ only in the PR number.
+  expect(hoverScopeOf('pr-ticket-SHOP-214-gitlab-shop-api-41')).not.toBe(
+    hoverScopeOf('pr-ticket-SHOP-214-gitlab-shop-api-42'),
   );
 });

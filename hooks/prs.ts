@@ -1058,3 +1058,21 @@ export function browserArgv(browser: string, url: string): string[] {
     ? words.map((w) => w.replaceAll('%s', url))
     : [...words, url];
 }
+
+/**
+ * The hover scope id of one band row: `pr-` and an 8-digit hex FNV-1a
+ * (32-bit) hash of the row's full identity string. Claude Code accepts a
+ * hover scope of 1 to 64 characters only, and drops the whole band when one
+ * is longer; a ticket key plus a long repo name, or a long shared-branch
+ * name, can push the identity past that. The id is always 11 characters,
+ * the same for the same identity, and in practice different for different
+ * rows.
+ */
+export function hoverScopeOf(identity: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < identity.length; i++) {
+    hash ^= identity.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `pr-${(hash >>> 0).toString(16).padStart(8, '0')}`;
+}
