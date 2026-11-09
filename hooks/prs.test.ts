@@ -15,12 +15,14 @@ import {
   browserArgv,
   buildGroups,
   changesOf,
+  CI_TEXT,
   fromGithub,
   fromGitlab,
   hasHeaders,
   hoverScopeOf,
   isReadyUnapproved,
   listText,
+  LOOK,
   nextOf,
   outcomeOf,
   parsePrUrl,
@@ -663,7 +665,7 @@ test('changesOf lists each PR that merged, closed, failed CI or became ready, on
       as(pr88, 'ready'),
     ]).text,
   ).toBe(
-    '✖ !41 shop-api CI failed · ✔ !42 shop-api merged · ⊘ !17 web closed · ● #88 docs ready to merge',
+    '✕ !41 shop-api CI failed · ✓ !42 shop-api merged · ⊘ !17 web closed · ◉ #88 docs ready to merge',
   );
 });
 
@@ -696,13 +698,13 @@ function toastsThrough(pr: Pr, states: Pr['state'][]): (string | undefined)[] {
 
 test('a ready PR whose merge status blips back to review is announced ready once', () => {
   expect(toastsThrough(gitlab(GITLAB_MR_41), ['review', 'ready', 'review', 'ready'])).toEqual([
-    '● !41 shop-api ready to merge',
+    '◉ !41 shop-api ready to merge',
     undefined,
     undefined,
   ]);
   const github = fromGithub(githubView({}));
   expect(toastsThrough(github, ['review', 'ready', 'review', 'ready', 'review', 'ready'])).toEqual([
-    '● #88 docs ready to merge',
+    '◉ #88 docs ready to merge',
     undefined,
     undefined,
     undefined,
@@ -711,21 +713,21 @@ test('a ready PR whose merge status blips back to review is announced ready once
 });
 
 test('a new CI run forgets what was announced, so its result is announced again', () => {
-  const ready = '● #88 docs ready to merge';
+  const ready = '◉ #88 docs ready to merge';
   const github = fromGithub(githubView({}));
   expect(toastsThrough(github, ['review', 'ready', 'running', 'ready'])).toEqual([
     ready,
     undefined,
     ready,
   ]);
-  const failed = '✖ !41 shop-api CI failed';
+  const failed = '✕ !41 shop-api CI failed';
   expect(
     toastsThrough(gitlab(GITLAB_MR_41), ['running', 'failing', 'running', 'failing']),
   ).toEqual([failed, undefined, failed]);
   // A failure after ready is announced too.
   expect(toastsThrough(github, ['review', 'ready', 'failing'])).toEqual([
     ready,
-    '✖ #88 docs CI failed',
+    '✕ #88 docs CI failed',
   ]);
 });
 
@@ -905,9 +907,9 @@ test('a finished group header says all merged, merged and closed, or all closed'
     return outcomeOf(group!);
   };
 
-  expect(outcome(['merged', 'merged'])).toEqual({ text: '✔ all 2 merged', color: 'merged' });
+  expect(outcome(['merged', 'merged'])).toEqual({ text: '✓ all 2 merged', color: 'merged' });
   expect(outcome(['merged', 'closed', 'closed'])).toEqual({
-    text: '✔ 1 merged · 2 closed',
+    text: '✓ 1 merged · 2 closed',
     color: 'merged',
   });
   expect(outcome(['closed'])).toEqual({ text: '⊘ all 1 closed', color: 'inactive' });
@@ -1191,12 +1193,12 @@ test('listText lists every PR by group with icon, link, label, CI, 👍 and note
   expect(listText({ fetchedAt: FETCHED_AT, groups, errors: [] }, FETCHED_AT + 5 * 60000)).toBe(
     [
       '**SHOP-214** Checkout retries · fetched 5m ago',
-      `- ● [!41](${GITLAB_MR_41.web_url}) shop-api — feat(SHOP-214): add retry to the checkout client · ready to merge · CI ✓ · 👍 1/1`,
+      `- ◉ [!41](${GITLAB_MR_41.web_url}) shop-api — feat(SHOP-214): add retry to the checkout client · ready to merge · CI ✓ · 👍 1/1`,
       `- ○ [!42](${PR_42}) shop-api — feat(SHOP-214): back off between checkout retries · in review · 👍 1/1 · unresolved threads`,
       '',
       '**SHOP-198**',
-      `- ✔ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · merged · 👍 2`,
-      `- ✔ [!12](${GITLAB_MR_12.web_url}) web — feat(SHOP-198): add a size chart to the product page · merged`,
+      `- ✓ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · merged · 👍 2`,
+      `- ✓ [!12](${GITLAB_MR_12.web_url}) web — feat(SHOP-198): add a size chart to the product page · merged`,
     ].join('\n'),
   );
 });
@@ -1207,7 +1209,7 @@ test('listText puts keyless PRs under a bare other header when a group exists', 
   expect(listText({ fetchedAt: FETCHED_AT, groups, errors: [] }, FETCHED_AT)).toBe(
     [
       '**SHOP-214** · fetched just now',
-      `- ● [!41](${GITLAB_MR_41.web_url}) shop-api — feat(SHOP-214): add retry to the checkout client · ready to merge · CI ✓ · 👍 1/1`,
+      `- ◉ [!41](${GITLAB_MR_41.web_url}) shop-api — feat(SHOP-214): add retry to the checkout client · ready to merge · CI ✓ · 👍 1/1`,
       '',
       '**other**',
       `- ◌ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · draft · 👍 0`,
@@ -1254,4 +1256,12 @@ test('hoverScopeOf gives the same scope for the same row and different scopes fo
   expect(hoverScopeOf('pr-ticket-SHOP-214-gitlab-shop-api-41')).not.toBe(
     hoverScopeOf('pr-ticket-SHOP-214-gitlab-shop-api-42'),
   );
+});
+
+test('no state icon or CI cell has an emoji form, which a terminal can draw two columns wide', () => {
+  const glyphs = [
+    ...Object.values(LOOK).map((look) => look.icon),
+    ...Object.values(CI_TEXT).map((text) => text.replace('CI ', '')),
+  ];
+  expect(glyphs.filter((glyph) => /\p{Emoji}/u.test(glyph))).toEqual([]);
 });
