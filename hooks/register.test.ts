@@ -668,7 +668,10 @@ test('a stacked row keeps the title and state widths of the other rows, grouped 
   await clock.settle();
 
   const plain = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
-  expect(await plain.find({ type: 'Text', text: '⧗ after #88' })).toBeDefined();
+  // Dim, not the warning color: a stacked PR waits on its base and asks nothing of the person.
+  const stackMark = await plain.find({ type: 'Text', text: '⧗ after #88' });
+  expect(stackMark?.props).toMatchObject({ dimColor: true });
+  expect(stackMark?.props.color).toBeUndefined();
   const list = await columnsOf(plain);
   expect(list.titles.map((c) => c.row)).toEqual([
     'pr-other-other-github-docs-88',
@@ -984,7 +987,7 @@ test('a refresh after a PR merged or closed toasts the change once, for both hos
   hosts.views = { [PR_88]: { ...GITHUB_88_VIEW, isDraft: false, state: 'CLOSED' } };
   await refreshNow();
   await refreshNow();
-  expect(toasts).toEqual(['✔ !42 shop-api merged · ⊘ #88 docs closed']);
+  expect(toasts).toEqual(['✓ !42 shop-api merged · ⊘ #88 docs closed']);
 });
 
 const PIPELINE = 'https://gitlab.com/acme/platform/shop-api/-/pipelines/5003';
@@ -1002,7 +1005,7 @@ test('a press on the CI cell opens the pipeline page; open <ref> ci does it by r
   await clock.settle();
 
   const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
-  const cell = await ui.find({ type: 'Text', text: 'CI ✖' });
+  const cell = await ui.find({ type: 'Text', text: 'CI ✕' });
   expect(cell?.props).toMatchObject({ color: 'error' });
   await ui.press({ key: 'ci-pr-ticket-SHOP-214-gitlab-shop-api-42' });
   expect(ran).toContainEqual(['explorer.exe', PIPELINE]);
@@ -1475,7 +1478,7 @@ test('a mixed ticket gives its merged and closed PRs their own rows, the closed 
   expect(closedRef?.props).toMatchObject({ dimColor: true });
   const closedTitle = await ui.find({ type: 'Text', text: /^finished change 7$/ });
   expect(closedTitle?.props).toMatchObject({ dimColor: true });
-  const ci = await ui.find({ type: 'Text', text: /^CI ✖$/ });
+  const ci = await ui.find({ type: 'Text', text: /^CI ✕$/ });
   expect(ci?.props).toMatchObject({ dimColor: true });
   expect(ci?.props.color).toBeUndefined();
 

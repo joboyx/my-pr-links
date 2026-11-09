@@ -95,12 +95,12 @@ Past 12 PRs, a finished group (every PR merged or closed) shows only its header 
 
 | Icon | State          |
 | ---- | -------------- |
-| `✖`  | CI failed      |
-| `●`  | ready to merge |
+| `✕`  | CI failed      |
+| `◉`  | ready to merge |
 | `◐`  | CI running     |
 | `◌`  | draft          |
 | `○`  | in review      |
-| `✔`  | merged         |
+| `✓`  | merged         |
 | `⊘`  | closed         |
 
 The group header names one next action. A PR with failed CI wins (`fix CI <ref>`), then a PR that is ready to merge (`you merge <ref>`). Otherwise the first open PR decides: `CI running <ref>`, `undraft <ref>` or `review <ref>`. With no open PR, the header says `all merged`. Groups with failed CI sort first, then groups ready to merge.

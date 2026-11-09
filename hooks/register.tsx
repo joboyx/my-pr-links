@@ -834,7 +834,7 @@ export const register: Register = (on, options) => {
             </Box>
             {m.stackedOn ? (
               <Box flexShrink={0}>
-                <Text color="warning">{stackMarkOf(m)}</Text>
+                <Text dimColor>{stackMarkOf(m)}</Text>
               </Box>
             ) : null}
           </Box>

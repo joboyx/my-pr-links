@@ -228,13 +228,15 @@ export type GithubReview = {
 };
 
 /**
- * Icon, theme color and label for each state.
+ * Icon, theme color and label for each state. An icon stays one column wide
+ * and has no emoji form, since a terminal can draw an emoji two columns wide
+ * and break the row's column alignment.
  */
 export const LOOK: Record<PrState, { icon: string; color: string; label: string }> = {
-  merged: { icon: '✔', color: 'merged', label: 'merged' },
-  ready: { icon: '●', color: 'success', label: 'ready to merge' },
+  merged: { icon: '✓', color: 'merged', label: 'merged' },
+  ready: { icon: '◉', color: 'success', label: 'ready to merge' },
   review: { icon: '○', color: 'suggestion', label: 'in review' },
-  failing: { icon: '✖', color: 'error', label: 'CI failed' },
+  failing: { icon: '✕', color: 'error', label: 'CI failed' },
   running: { icon: '◐', color: 'warning', label: 'CI running' },
   draft: { icon: '◌', color: 'inactive', label: 'draft' },
   closed: { icon: '⊘', color: 'inactive', label: 'closed' },
@@ -243,7 +245,7 @@ export const LOOK: Record<PrState, { icon: string; color: string; label: string 
 /**
  * Row text of each CI status, such as `CI ✓` for a passed pipeline.
  */
-export const CI_TEXT: Record<CiStatus, string> = { pass: 'CI ✓', fail: 'CI ✖', run: 'CI …' };
+export const CI_TEXT: Record<CiStatus, string> = { pass: 'CI ✓', fail: 'CI ✕', run: 'CI …' };
 
 /**
  * The next action of a group and who owns it.
@@ -747,15 +749,15 @@ export const isFinished = (group: PrGroup) => !group.prs.some(isOpen);
 export const hasHeaders = (groups: readonly PrGroup[]) => groups.some((g) => g.kind !== 'other');
 
 /**
- * Header text and theme color of a finished group (no open PR): `✔ all N
- * merged`, `✔ N merged · M closed`, or `⊘ all N closed` in the inactive
+ * Header text and theme color of a finished group (no open PR): `✓ all N
+ * merged`, `✓ N merged · M closed`, or `⊘ all N closed` in the inactive
  * color.
  */
 export function outcomeOf(group: PrGroup): { text: string; color: string } {
   const merged = group.prs.filter((m) => m.state === 'merged').length;
   const closed = group.prs.filter((m) => m.state === 'closed').length;
   if (merged === 0) return { text: `⊘ all ${closed} closed`, color: LOOK.closed.color };
-  const text = closed === 0 ? `✔ all ${merged} merged` : `✔ ${merged} merged · ${closed} closed`;
+  const text = closed === 0 ? `✓ all ${merged} merged` : `✓ ${merged} merged · ${closed} closed`;
   return { text, color: LOOK.merged.color };
 }
 
@@ -786,8 +788,8 @@ export type Announced = Record<string, PrState[]>;
 
 /**
  * Toast text for the PRs whose state changed into merged, closed, CI failed
- * or ready to merge since the previous snapshot, such as `✔ !42 shop-api
- * merged · ✖ #88 docs CI failed`, and the announced states updated with
+ * or ready to merge since the previous snapshot, such as `✓ !42 shop-api
+ * merged · ✕ #88 docs CI failed`, and the announced states updated with
  * them. A PR matches by URL; a PR not in `previous` (the first snapshot, a
  * newly tracked PR) or not in `next` (missing from this fetch) is skipped.
  * A state already in `announced` for the PR is not announced again, so a
