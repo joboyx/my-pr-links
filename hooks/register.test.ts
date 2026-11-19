@@ -18,6 +18,7 @@ const BAND = {
   component: 'AbovePrompt',
   props: {
     hasSurvey: false,
+    isCollapsed: false,
     isWorking: false,
     maxRows: 10,
     bodyColumns: 160,
@@ -612,7 +613,7 @@ for (const [name, title] of [
   });
 }
 
-test('a long row title is cut to 50 characters; its hover detail keeps the full title', async ($, on) => {
+test('a long row title is cut to 50 characters and no hover detail line is drawn', async ($, on) => {
   const long = 'feat(SHOP-214): add a retry with exponential backoff and jitter to every checkout call';
   const { clock } = hostsFor(on, {
     glab: ok({ ...GITLAB_MR_42, title: long }),
@@ -627,8 +628,8 @@ test('a long row title is cut to 50 characters; its hover detail keeps the full 
   expect(row?.text).toBe('add a retry with exponential backoff and jitter t…');
   expect(row?.text.length).toBe(50);
   expect(row?.props).toMatchObject({ wrap: 'truncate-end' });
-  const detail = await ui.find({ key: 'd-pr-ticket-SHOP-214-gitlab-shop-api-42' });
-  expect(detail?.text).toContain(long);
+  // A hover detail line above the band shifted the band down on every hover.
+  expect(await ui.find({ key: 'd-pr-ticket-SHOP-214-gitlab-shop-api-42' })).toBeUndefined();
 });
 
 /**
@@ -1364,7 +1365,7 @@ test('a description trailer puts PRs from both hosts in the ticket group', async
   expect(list.text).not.toMatch(/Adds a backoff|Shows a banner/);
 });
 
-test('a ticket PR in a long repo name still draws its row and hover detail', async ($, on) => {
+test('a ticket PR in a long repo name still draws its row', async ($, on) => {
   const pr = {
     ...GITHUB_88_VIEW,
     number: 198,
@@ -1382,11 +1383,8 @@ test('a ticket PR in a long repo name still draws its row and hover detail', asy
   const rowId = 'pr-ticket-SHOP-214-github-shop-api-storefront-checkout-service-v2-198';
   expect(rowId.length).toBeGreaterThan(64);
   expect((await ui.find({ key: 'group-ticket-SHOP-214' }))?.text).toMatch(/\[#198\]/);
-  expect(await ui.find({ type: 'Text', text: 'retry the storefront checkout' })).toBeDefined();
   // The engine refuses the whole band when a hover scope is past 64 characters.
-  expect((await ui.find({ key: `d-${rowId}` }))?.text).toContain(
-    'shop-api-storefront-checkout-service-v2 #198',
-  );
+  expect(await ui.find({ type: 'Text', text: 'retry the storefront checkout' })).toBeDefined();
 });
 
 test('/my-pr-links toggles the band', async ($) => {
@@ -1482,15 +1480,11 @@ test('a mixed ticket gives its merged and closed PRs their own rows, the closed 
   expect(ci?.props).toMatchObject({ dimColor: true });
   expect(ci?.props.color).toBeUndefined();
 
-  // The row note shows on the open PR only; the hover detail keeps it for every PR.
+  // The row note shows on the open PR only.
   const rowRemarks = (await ui.findAll({ type: 'Text', text: /^· / })).filter(
     (t) => t.props.color === 'warning',
   );
   expect(rowRemarks.map((t) => t.text)).toEqual(['· unresolved threads']);
-  for (const iid of [7, 28]) {
-    const detail = await ui.find({ key: `d-pr-ticket-SHOP-214-gitlab-shop-api-${iid}` });
-    expect(detail?.text).toMatch(`finished change ${iid}`);
-  }
 });
 
 test('/my-pr-links list prints the snapshot, even with the band hidden', async ($, on) => {
