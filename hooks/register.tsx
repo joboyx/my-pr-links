@@ -43,7 +43,7 @@ import type {
  * (or one of its subagents) created or updated, above the prompt, grouped by
  * ticket key or shared source branch and fetched one by one with `glab` and
  * `gh`. Click a PR to open it in the host browser, or its CI cell to open
- * the pipeline or checks page; hover it for the full title. A toast says
+ * the pipeline or checks page; `list` prints the full titles. A toast says
  * when a PR merges, closes, fails CI or becomes ready to merge.
  * `/my-pr-links` shows or hides the band, `list` prints every PR of the last
  * fetch, `refresh` fetches now, `open <ref> [ci]` opens a PR or its CI page,
@@ -850,30 +850,6 @@ export const register: Register = (on, options) => {
       );
     };
 
-    const detail = (group: PrGroup, m: Pr) => {
-      const rowId = rowIdOf(group, m);
-      return (
-        <Box
-          key={`d-${rowId}`}
-          display="none"
-          hover={{ scope: hoverScopeOf(rowId), display: 'flex' }}
-          gap={1}
-        >
-          <Text color="claude">›</Text>
-          <Text bold>
-            {m.repo} {m.ref}
-          </Text>
-          <Text wrap="truncate-end">{m.title}</Text>
-          <Text dimColor>→ {m.targetBranch}</Text>
-          {m.note ? (
-            <Text italic dimColor>
-              · {m.note}
-            </Text>
-          ) : null}
-        </Box>
-      );
-    };
-
     const groupOf = (group: PrGroup, first: boolean) => {
       const key = `group-${group.kind}-${group.id}`;
       if (!headed) {
@@ -922,7 +898,6 @@ export const register: Register = (on, options) => {
 
     const band = (
       <Box flexDirection="column">
-        {groups.flatMap((group) => drawnPrsOf(group).map((m) => detail(group, m)))}
         {snap.errors.length > 0 && <Text dimColor>⚠ {snap.errors.join(' · ')}</Text>}
         {groups.map((group, i) => groupOf(group, i === 0))}
       </Box>
