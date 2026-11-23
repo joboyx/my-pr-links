@@ -56,7 +56,14 @@ cat > "$OUT/bin/title" <<EOF
 printf '%s\n' "\$1" >> "$OUT/title-calls.txt"
 echo "Verify title for \$1"
 EOF
-chmod +x "$OUT/bin/browser" "$OUT/bin/title"
+# gh stub for scenario 14: fail the chain lookups (`gh pr list`), run the real gh for every other call.
+mkdir -p "$OUT/bin-nogh"
+cat > "$OUT/bin-nogh/gh" <<EOF
+#!/bin/sh
+if [ "\$1 \$2" = "pr list" ]; then echo "stub: pr list fails" >&2; exit 1; fi
+exec '$(command -v gh)' "\$@"
+EOF
+chmod +x "$OUT/bin/browser" "$OUT/bin/title" "$OUT/bin-nogh/gh"
 
 cat > "$OUT/lib.sh" <<EOF
 REPO='$REPO'
@@ -104,7 +111,7 @@ Between two `add` commands, wait up to 4 s for the reply to the first one: `wait
 
 ## Scenarios
 
-Session A runs with no title command. Session B runs with the title command stub. Session C runs with a `BROWSER` that does not exist.
+Session A runs with no title command. Session B runs with the title command stub. Session C runs with a `BROWSER` that does not exist. Session D runs with a `gh` that fails the chain lookups.
 
 ```sh
 . "<OUT>/lib.sh"; A=prl-a-<timestamp>
@@ -126,15 +133,15 @@ ready "$A"; snap "$A" 00-start
 | 10  | Title command on          | `B=prl-b-<timestamp>`; `start "$B" "MY_PR_LINKS_TASK_TITLE_CMD='$OUT/bin/title'"`; `ready "$B"`; `send` `add` for `apache/kafka/pull/23862`; `wait_for "$B" 'Added #23862' 4`; `send` `add` for `cli/cli/pull/14767`; `wait_for "$B" 'Verify title for KAFKA-21305' 60`; `wait_for "$B" '#14767 +cli ' 60` (the title shows before the second fetch ends); `snap "$B" 10-title-on` | Header `KAFKA-21305` then `Verify title for KAFKA-21305`; `title-calls.txt` holds `KAFKA-21305` (the command runs once per ticket key per fetch, so the key can appear more than once); the `cli` row sits under `other` |                                                                                                                                                                                                                                                                                                       |
 | 11  | Bad BROWSER               | `C=prl-c-<timestamp>`; `start "$C" "BROWSER=no-such-browser-xyz"`; `ready "$C"`; `send` `add` for `cli/cli/pull/14767`; `wait_for "$C" 'Added #14767' 30`; `wait_for "$C" '#14767 +cli ' 60`; `send "$C" '/my-pr-links open 14767'`; `wait_for "$C" 'Opened                                                                                                                        | could not open' 30`; `snap "$C" 11-bad-browser`                                                                                                                                                                          | Reply is `Opened … ` (platform fallback) or `could not open … : <reason>`; the prompt returns and the session does not hang. The reply `No PR … in the band.` means the wait was too short: FAIL of the step, not the plugin. On WSL the fallback opens a real browser tab once                       |
 | 12  | Open CI via `$BROWSER`    | `N=$(wc -l < "$OUT/opened.txt")`; `send "$A" '/my-pr-links open #14767 ci'`; `wait_for "$A" 'Opened CI of'`; `snap "$A" 12-open-ci`; `tail -n +$((N+1)) "$OUT/opened.txt"                                                                                                                                                                                                          | tail -1`                                                                                                                                                                                                                 | The last line that this step added to `opened.txt` is a check page such as `https://github.com/cli/cli/actions/runs/<id>/job/<id>`, not the PR URL; reply starts `Opened CI of cli #14767`; the reply `No CI page for #14767.` is also a pass (the PR has no checks), and then this step adds no line |
-| 13  | Stack members             | `send` `add` for `cli/cli/pull/14923` (the top of an open draft chain #14920 → #14921 → #14922 → #14923 on `trunk`); `wait_for "$A" 'Added #14923' 4`; `wait_for "$A" '#14920 +cli .*in stack' 60`; `snap "$A" 13-stack`; `send "$A" '/my-pr-links refresh'`; `wait_for "$A" 'PRs from this session'`; `snap "$A" 13b-stack-refresh` | Before and after the refresh, rows `#14920`, `#14921` and `#14922` (and any open child of `#14923`) show `in stack` with a dim ref and title, in chain order; `#14923` shows `⧗ after #14922` with no `in stack` mark; the refresh reply counts tracked PRs only. If the chain is gone, pick another open chain on a well-known repo with `gh pr list --base <head>` | |
-| 14  | Stack lookup fails        | `D=prl-d-<timestamp>`; `start "$D" "PATH=$OUT/bin-nogh:$PATH"`, where `$OUT/bin-nogh/gh` is a stub that fails `gh pr list` (`exit 1`) and runs the real `gh` (its absolute path) for every other call; `ready "$D"`; `send` `add` for `cli/cli/pull/14923`; `wait_for "$D" '#14923 +cli ' 60`; `snap "$D" 14-stack-fails` | The row `#14923` shows with no `⧗ after` mark; no `in stack` row and no error line show | |
+| 13  | Stack members             | `send` `add` for `cli/cli/pull/14923` (a middle PR of the open draft chain #14920 → … → #14927 on `trunk`); `wait_for "$A" 'Added #14923' 4`; `wait_for "$A" '#14920 +cli .*in stack' 60`; `snap "$A" 13-stack`; `tmux capture-pane -p -e -t "$A" > "$OUT/13-stack-ansi.txt"`; `send "$A" '/my-pr-links refresh'`; `wait_for "$A" '5 PRs from this session'`; `snap "$A" 13b-stack-refresh` | Before and after the refresh, rows `#14920`, `#14921` and `#14922`, and every open PR below `#14923` in the chain, show `in stack`, in chain order; in `13-stack-ansi.txt` their refs carry SGR 2 (dim, `ESC[2m`) and the `#14923` ref does not; `#14923` shows `⧗ after #14922` with no `in stack` mark; the refresh reply is `5 PRs from this session` (the 5 tracked PRs of session A; members are not counted). If the chain is gone, pick another open chain on a well-known repo with `gh pr list --base <head>` | |
+| 14  | Stack lookup fails        | `D=prl-d-<timestamp>`; `start "$D" "PATH=$OUT/bin-nogh:$PATH"` (the `gh` stub from Setup); `ready "$D"`; `send` `add` for `cli/cli/pull/14923`; `wait_for "$D" '#14923 +cli ' 60`; `snap "$D" 14-stack-fails` | The row `#14923` shows with no `⧗ after` mark; no `in stack` row and no error line show | |
 
 For each scenario, compare the capture with the pass rule. On a fail, keep the capture, take one more capture after 10 s (a fetch can be slow), and record both.
 
 ## Cleanup
 
 ```sh
-tmux kill-session -t "$A"; tmux kill-session -t "$B"; tmux kill-session -t "$C"
+tmux kill-session -t "$A"; tmux kill-session -t "$B"; tmux kill-session -t "$C"; tmux kill-session -t "$D"
 tmux ls 2>/dev/null | grep prl- || echo "no verify sessions left"
 ```
 
@@ -158,7 +165,7 @@ End with this table. Give the proof file as the full path under `$OUT`.
 | 10 | Title command on         | pass/fail | `$OUT/10-title-on.txt`, `$OUT/title-calls.txt` |
 | 11 | Bad BROWSER              | pass/fail | `$OUT/11-bad-browser.txt`    |
 | 12 | Open CI via `$BROWSER`   | pass/fail | `$OUT/opened.txt`, `$OUT/12-open-ci.txt` |
-| 13 | Stack members            | pass/fail | `$OUT/13-stack.txt`, `$OUT/13b-stack-refresh.txt` |
+| 13 | Stack members            | pass/fail | `$OUT/13-stack.txt`, `$OUT/13-stack-ansi.txt`, `$OUT/13b-stack-refresh.txt` |
 | 14 | Stack lookup fails       | pass/fail | `$OUT/14-stack-fails.txt`    |
 
 Under the table, quote the band lines from the capture of each failed scenario.
