@@ -3,11 +3,15 @@ import { expect, test } from 'claude-code/testing';
 import {
   GITHUB_88_VIEW,
   GITHUB_LATEST_REVIEWS,
+  GITHUB_STACK,
   GITLAB_41_APPROVALS,
+  GITLAB_LIST_CHECKOUT_RETRY,
+  GITLAB_LIST_ON_BACKOFF,
   GITLAB_MR_12,
   GITLAB_MR_17,
   GITLAB_MR_41,
   GITLAB_MR_42,
+  GITLAB_MR_43,
   GITLAB_NO_RULE_APPROVALS,
   SESSION_CREATE_CALLS,
 } from './fixtures';
@@ -18,19 +22,36 @@ import {
   CI_TEXT,
   fromGithub,
   fromGitlab,
+  githubStackCandidates,
+  gitlabStackCandidates,
   hasHeaders,
   hoverScopeOf,
   isReadyUnapproved,
   listText,
   LOOK,
+  MAX_STACK_DEPTH,
+  MAX_STACK_MEMBERS,
+  needsFastRefresh,
   nextOf,
   outcomeOf,
   parsePrUrl,
+  rowMarkOf,
   rowTitleOf,
+  STACK_MEMBER_MARK,
+  stackMembersOf,
   ticketOf,
   trackedUrls,
 } from './prs';
-import type { Announced, GithubCheck, GithubPrView, GitlabMrItem, Pr, PrGroup } from './prs';
+import type {
+  Announced,
+  GithubCheck,
+  GithubPrView,
+  GitlabMrItem,
+  Pr,
+  PrGroup,
+  StackCandidate,
+  StackLookup,
+} from './prs';
 
 const byRef = (prs: Pr[], ref: string) => prs.find((m) => m.ref === ref)!;
 
@@ -947,7 +968,7 @@ test('groups sort failing, then yours, then waiting, with other last', () => {
   const groups = buildGroups([other, waitingB, yours, waitingA, failing]);
 
   expect(groups.map((g) => g.id)).toEqual(['ZZZ-1', 'CCC-1', 'AAA-1', 'BBB-1', 'other']);
-  expect(groups.map((g) => nextOf(g).text)).toEqual([
+  expect(groups.map((g) => nextOf(g)?.text)).toEqual([
     'fix CI !4',
     'you merge !3',
     'review !1',
@@ -1256,6 +1277,288 @@ test('hoverScopeOf gives the same scope for the same row and different scopes fo
   expect(hoverScopeOf('pr-ticket-SHOP-214-gitlab-shop-api-41')).not.toBe(
     hoverScopeOf('pr-ticket-SHOP-214-gitlab-shop-api-42'),
   );
+});
+
+/**
+ * A chain candidate in acme/web, open and from the same repo unless told.
+ */
+const cand = (
+  number: number,
+  sourceBranch: string,
+  targetBranch: string,
+  state: StackCandidate<null>['state'] = 'open',
+  isFork = false,
+): StackCandidate<null> => ({
+  number,
+  url: `https://github.com/acme/web/pull/${number}`,
+  sourceBranch,
+  targetBranch,
+  state,
+  isFork,
+  item: null,
+});
+
+/**
+ * A chain lookup over `all`, the way the hosts answer: every PR from a
+ * source branch, or the open PRs on a target branch. `fail` names one query
+ * (`source b` or `target b`) that fails. `queries` records each query.
+ */
+function lookupOver(all: StackCandidate<null>[], fail?: string) {
+  const queries: string[] = [];
+  const lookup: StackLookup<null> = async ({ by, branch }) => {
+    const query = `${by} ${branch}`;
+    queries.push(query);
+    if (query === fail) return undefined;
+    return all.filter((c) =>
+      by === 'source' ? c.sourceBranch === branch : c.targetBranch === branch && c.state === 'open',
+    );
+  };
+  return { lookup, queries };
+}
+
+/**
+ * The tracked PR the chain search starts from.
+ */
+const root = (number: number, sourceBranch: string, targetBranch: string) => ({
+  url: `https://github.com/acme/web/pull/${number}`,
+  sourceBranch,
+  targetBranch,
+});
+
+const numbers = (found: StackCandidate<null>[] | undefined) => found?.map((c) => c.number);
+
+test('stack: an untracked parent chain is found from a child, nearest first', async () => {
+  const { lookup, queries } = lookupOver([cand(1, 'a', 'main'), cand(2, 'b', 'a')]);
+
+  expect(numbers(await stackMembersOf(root(3, 'c', 'b'), lookup))).toEqual([2, 1]);
+  // `main` is never looked up as a parent's branch.
+  expect(queries).toEqual(['source b', 'source a', 'target c']);
+});
+
+test('stack: children are found from a parent, level by level, by number', async () => {
+  const { lookup, queries } = lookupOver([
+    cand(5, 'c', 'b'),
+    cand(3, 'b2', 'a'),
+    cand(2, 'b', 'a'),
+    cand(9, 'b3', 'a', 'merged'),
+  ]);
+
+  expect(numbers(await stackMembersOf(root(1, 'a', 'main'), lookup))).toEqual([2, 3, 5]);
+  expect(queries).toEqual(['target a', 'target b', 'target b2', 'target c']);
+});
+
+test('stack: a middle PR finds its parents, then its children', async () => {
+  const { lookup } = lookupOver([cand(1, 'a', 'main'), cand(3, 'c', 'b'), cand(4, 'd', 'c')]);
+
+  expect(numbers(await stackMembersOf(root(2, 'b', 'a'), lookup))).toEqual([1, 3, 4]);
+});
+
+test('stack: a default target branch looks up no parent, in any case', async () => {
+  for (const target of ['main', 'Develop', 'trunk', 'staging', 'production', '']) {
+    const { lookup, queries } = lookupOver([cand(1, target, 'main')]);
+    expect(numbers(await stackMembersOf(root(2, 'b', target), lookup))).toEqual([]);
+    expect(queries).toEqual(['target b']);
+  }
+});
+
+test('stack: a PR from a default branch lists no children', async () => {
+  const { lookup, queries } = lookupOver([cand(1, 'x', 'develop')]);
+
+  expect(numbers(await stackMembersOf(root(2, 'develop', 'main'), lookup))).toEqual([]);
+  expect(queries).toEqual([]);
+});
+
+test('stack: a child from a default branch is kept, but its children are not looked up', async () => {
+  const { lookup, queries } = lookupOver([cand(3, 'dev', 'b'), cand(4, 'y', 'dev')]);
+
+  expect(numbers(await stackMembersOf(root(2, 'b', 'main'), lookup))).toEqual([3]);
+  expect(queries).toEqual(['target b']);
+});
+
+test('stack: a PR from a fork never counts, as parent or child', async () => {
+  const { lookup } = lookupOver([cand(1, 'a', 'main', 'open', true), cand(3, 'c', 'b', 'open', true)]);
+
+  expect(numbers(await stackMembersOf(root(2, 'b', 'a'), lookup))).toEqual([]);
+});
+
+test('stack: the parent is the open PR before a merged one, then the newest; never a closed one', async () => {
+  const pick = async (all: StackCandidate<null>[]) =>
+    numbers(await stackMembersOf(root(9, 'b', 'a'), lookupOver(all).lookup));
+
+  expect(await pick([cand(1, 'a', 'main', 'merged'), cand(2, 'a', 'main')])).toEqual([2]);
+  expect(await pick([cand(3, 'a', 'main', 'open'), cand(2, 'a', 'main', 'merged'), cand(4, 'a', 'main', 'merged')])).toEqual([3]);
+  expect(await pick([cand(1, 'a', 'main', 'merged'), cand(4, 'a', 'main', 'merged')])).toEqual([4]);
+  expect(await pick([cand(5, 'a', 'main', 'closed')])).toEqual([]);
+});
+
+test('stack: a cycle of branches ends at the first branch already seen', async () => {
+  // b targets a and a targets b: each lookup comes back to a seen branch.
+  const { lookup, queries } = lookupOver([cand(1, 'b', 'a'), cand(3, 'a', 'b')]);
+
+  expect(numbers(await stackMembersOf(root(2, 'a', 'b'), lookup))).toEqual([1]);
+  expect(queries).toEqual(['source b', 'target a']);
+});
+
+test('stack: each direction follows at most 10 links', async () => {
+  // A 15-PR chain under the root and another over it.
+  const below = Array.from({ length: 15 }, (_, i) => cand(100 + i, `p${i}`, `p${i + 1}`));
+  const above = Array.from({ length: 15 }, (_, i) => cand(200 + i, `c${i}`, i === 0 ? 'r' : `c${i - 1}`));
+  const parents = await stackMembersOf(root(1, 'x', 'p0'), lookupOver(below).lookup);
+  const children = await stackMembersOf(root(1, 'r', 'main'), lookupOver(above).lookup);
+
+  expect(numbers(parents)).toEqual(below.slice(0, 10).map((c) => c.number));
+  expect(numbers(children)).toEqual(above.slice(0, 10).map((c) => c.number));
+});
+
+test('stack: one tracked PR keeps at most 20 members, parents first', async () => {
+  const parents = Array.from({ length: 5 }, (_, i) => cand(100 + i, `p${i}`, `p${i + 1}`));
+  const children = Array.from({ length: 30 }, (_, i) => cand(200 + i, `c${i}`, 'r'));
+  const { lookup } = lookupOver([...parents, ...children]);
+  const found = await stackMembersOf(root(1, 'r', 'p0'), lookup);
+
+  expect(found).toHaveLength(MAX_STACK_MEMBERS);
+  expect(numbers(found)?.slice(0, 6)).toEqual([100, 101, 102, 103, 104, 200]);
+  expect(numbers(found)?.at(-1)).toBe(214);
+  expect(MAX_STACK_DEPTH).toBe(10);
+});
+
+test('stack: any failed lookup gives no members at all', async () => {
+  const all = [cand(1, 'a', 'main'), cand(3, 'c', 'b')];
+
+  expect(await stackMembersOf(root(2, 'b', 'a'), lookupOver(all, 'source a').lookup)).toBeUndefined();
+  expect(await stackMembersOf(root(2, 'b', 'a'), lookupOver(all, 'target c').lookup)).toBeUndefined();
+});
+
+test('gh pr list output maps to chain candidates; a fork is marked', () => {
+  const { base, fork } = GITHUB_STACK;
+  const merged = { ...base, number: 300, state: 'MERGED' };
+
+  expect(githubStackCandidates([base, fork, merged])?.map(({ item: _, ...c }) => c)).toEqual([
+    { number: 301, url: base.url, sourceBranch: 'octo-user/cart-api', targetBranch: 'main', state: 'open', isFork: false },
+    { number: 304, url: fork.url, sourceBranch: 'octo-user/cart-typo', targetBranch: 'octo-user/cart-ui', state: 'open', isFork: true },
+    { number: 300, url: base.url, sourceBranch: 'octo-user/cart-api', targetBranch: 'main', state: 'merged', isFork: false },
+  ]);
+  expect(githubStackCandidates([base])?.[0]?.item).toBe(base);
+  expect(githubStackCandidates(base)).toBeUndefined();
+  expect(githubStackCandidates([null])).toBeUndefined();
+});
+
+test('glab merge request list output maps to chain candidates; a fork project is marked', () => {
+  const [open, closed] = GITLAB_LIST_CHECKOUT_RETRY;
+  const [, fork] = GITLAB_LIST_ON_BACKOFF;
+  const locked = { ...open!, iid: 29, state: 'locked' };
+
+  expect(
+    gitlabStackCandidates([open, closed, fork, locked])?.map((c) => `${c.number} ${c.state} ${c.isFork}`),
+  ).toEqual(['41 open false', '30 closed false', '44 open true', '29 closed false']);
+  expect(gitlabStackCandidates([open])?.[0]).toMatchObject({
+    url: GITLAB_MR_41.web_url,
+    sourceBranch: 'feature/SHOP-214-checkout-retry',
+    targetBranch: 'main',
+  });
+  expect(gitlabStackCandidates(GITLAB_MR_41)).toBeUndefined();
+});
+
+/**
+ * A stack member row found by the chain of `finder`.
+ */
+const member = (pr: Pr, finder: Pr): Pr => ({ ...pr, stackOf: finder.url });
+
+test('a keyless member joins the group of the PR that found it, in stack order', () => {
+  const { base, middle, top } = GITHUB_STACK;
+  const tracked = fromGithub({ ...middle, headRefName: 'feature/ABC-123-cart-ui' });
+  const child = fromGithub({ ...top, baseRefName: 'feature/ABC-123-cart-ui' });
+  const groups = buildGroups([tracked, member(fromGithub(base), tracked), member(child, tracked)]);
+
+  expect(groups.map((g) => `${g.kind} ${g.id}`)).toEqual(['ticket ABC-123']);
+  expect(groups[0]?.prs.map((m) => `${m.ref} ${rowMarkOf(m) || '-'}`)).toEqual([
+    '#301 in stack',
+    '#302 ⧗ after #301',
+    '#303 ⧗ after #302 · in stack',
+  ]);
+});
+
+test('a member with its own ticket key goes to that ticket group', () => {
+  const tracked = gitlab(GITLAB_MR_42);
+  const parent = member(gitlab({ ...GITLAB_MR_41, source_branch: 'feature/ABC-123-checkout-retry', title: 'add retry' }), tracked);
+  const groups = buildGroups([{ ...tracked, targetBranch: parent.sourceBranch }, parent]);
+
+  // A group of members only has no next action and sorts after the groups with tracked work.
+  expect(groups.map((g) => `${g.id} ${g.prs.map((m) => m.ref).join(',')} ${nextOf(g)?.text ?? '-'}`)).toEqual([
+    'SHOP-214 !42 review !42',
+    'ABC-123 !41 -',
+  ]);
+  // The mark crosses groups; the row order stays in each group.
+  expect(groups[0]?.prs[0]?.stackedOn).toBe('!41');
+});
+
+test('the next action and the group rank come from tracked PRs only', () => {
+  const tracked = gitlab(GITLAB_MR_42);
+  const ready = member(gitlab(GITLAB_MR_41), tracked);
+  const failing = member(gitlab({ ...GITLAB_MR_43, head_pipeline: { status: 'failed' } }), tracked);
+  const [group] = buildGroups([tracked, ready, failing]);
+
+  // Without the members' rows, !42 waits on review; the members still show their own state.
+  expect(nextOf(group!)).toEqual({ kind: 'waiting', text: 'review !42' });
+  expect(group?.prs.map((m) => `${m.ref} ${m.state}`)).toEqual(['!41 ready', '!42 review', '!43 failing']);
+  // The tracked PR stacked on the open member keeps its mark.
+  expect(byRef(group!.prs, '!42').stackedOn).toBe('!41');
+
+  // A waiting tracked group sorts after a tracked group you merge, whatever its members.
+  const other = gitlab({ ...GITLAB_MR_41, iid: 7, source_branch: 'feature/ABC-123-x', web_url: `${GITLAB_MR_41.web_url}7` });
+  expect(buildGroups([tracked, ready, failing, other]).map((g) => g.id)).toEqual(['ABC-123', 'SHOP-214']);
+
+  // All tracked PRs merged: done, even with an open member.
+  const [done] = buildGroups([{ ...tracked, state: 'merged' }, ready]);
+  expect(nextOf(done!)).toEqual({ kind: 'done', text: 'all merged' });
+});
+
+test('only a tracked PR with CI running or ready to merge asks for the fast refresh', () => {
+  const tracked = gitlab(GITLAB_MR_42);
+  const running = gitlab({ ...GITLAB_MR_43 });
+
+  expect(needsFastRefresh([tracked])).toBe(false);
+  expect(needsFastRefresh([tracked, member(running, tracked)])).toBe(false);
+  expect(needsFastRefresh([tracked, member(gitlab(GITLAB_MR_41), tracked)])).toBe(false);
+  expect(needsFastRefresh([running])).toBe(true);
+  expect(needsFastRefresh([gitlab(GITLAB_MR_41)])).toBe(true);
+});
+
+test('members never form a shared-branch group', () => {
+  const branch = 'octo-user/shared';
+  const tracked = githubPr(1, branch);
+  const groups = buildGroups([tracked, member(githubPr(2, branch), tracked)]);
+
+  expect(groups.map((g) => `${g.kind} ${g.id}`)).toEqual(['other other']);
+});
+
+test('changesOf never toasts a member, nor a member that became tracked', () => {
+  const tracked = gitlab(GITLAB_MR_42);
+  const parent = gitlab(GITLAB_MR_41);
+  const was = [tracked, member({ ...parent, state: 'review' }, tracked)];
+
+  expect(changesOf(was, [tracked, member(parent, tracked)]).text).toBeUndefined();
+  expect(changesOf(was, [tracked, parent]).text).toBeUndefined();
+  expect(changesOf([member(parent, tracked)], [{ ...parent, state: 'merged' }]).text).toBeUndefined();
+});
+
+test('listText marks a member in stack', () => {
+  const tracked = fromGithub(GITHUB_88_VIEW);
+  const parent = member(githubPr(80, 'octo-user/docs-base'), tracked);
+  const [group] = buildGroups([tracked, parent]);
+
+  expect(listText({ fetchedAt: FETCHED_AT, groups: [group!], errors: [] }, FETCHED_AT)).toContain(
+    `- ○ [#80](https://github.com/octo-org/docs/pull/80) docs — chore: tidy · in review · 👍 0 · in stack`,
+  );
+});
+
+test('rowMarkOf: the ⧗ mark, the in-stack mark, both, or nothing', () => {
+  const pr = fromGithub(GITHUB_88_VIEW);
+
+  expect(rowMarkOf(pr)).toBe('');
+  expect(rowMarkOf({ ...pr, stackedOn: '#80' })).toBe('⧗ after #80');
+  expect(rowMarkOf({ ...pr, stackOf: PR_88 })).toBe(STACK_MEMBER_MARK);
+  expect(rowMarkOf({ ...pr, stackedOn: '#80', stackOf: PR_88 })).toBe('⧗ after #80 · in stack');
 });
 
 test('no state icon or CI cell has an emoji form, which a terminal can draw two columns wide', () => {

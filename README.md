@@ -18,7 +18,7 @@
 - **Click to open.** Click a ref to open the PR, or the CI cell to open the pipeline (GitLab) or check (GitHub) page.
 - **Change toasts.** A toast says when a PR merges, closes, fails CI or becomes ready to merge.
 - **Folding.** Past 12 PRs, finished groups shrink to their header line.
-- **Stacked PRs.** A PR that targets the branch of another open PR shows `⧗ after <ref>` and sorts after its base.
+- **Stacked PRs.** A PR that targets the branch of another open PR shows `⧗ after <ref>` and sorts after its base. The band also shows the other PRs in the branch chain of a session PR, marked `in stack`.
 - **Several `gh` accounts.** Each PR is fetched as an account that can read it.
 
 ## Screenshots
@@ -127,6 +127,14 @@ A row shows the PR title without a draft marker (`Draft:`, `WIP:`, `[Draft]`, `[
 
 A PR whose target branch is the source branch of another open PR in the same repo stacks on that PR. Its row shows `⧗ after <ref>`. In the same group it sorts right after its base. When the base merges, the mark goes and the PR keeps its place.
 
+On each fetch, the band also follows the branch chain of every session PR, in the same repo only:
+
+- Parents: while the target branch is not `main`, `master`, `develop`, `dev`, `trunk`, `staging` or `production`, the PR whose source branch is that target. An open PR wins over a merged one, then the newest. A closed PR never counts.
+- Children: the open PRs that target the PR's source branch, then theirs in turn. A PR whose source branch is one of the branches above lists no children.
+- The search stops at a branch it already saw, after 10 links in each direction, and at 20 PRs per session PR. PRs from a fork never count.
+
+A PR found this way and not touched by the session is a stack member. Its row has a dim ref and title and the mark `in stack` (`⧗ after #301 · in stack` when it is also stacked); `list` adds `in stack` too. A member joins the group of its ticket key, else the group of the session PR that found it, and takes its place in the stack order. Members are there to show the chain: a member row shows its own state and CI, but the group header's next action, the group order and the 1-minute refresh use session PRs only. A session PR stacked on an open member still shows `⧗ after <ref>`. Members never toast, and `refresh` does not count them. When one lookup call fails, that session PR shows no members on that fetch, with no error line.
+
 ## Several GitHub accounts
 
 When `gh` is logged in to more than one github.com account, the mod fetches each PR as an account that can read it:
@@ -180,8 +188,8 @@ The mod runs these commands as you, with no shell:
 
 | Command             | When                                                             |
 | ------------------- | ---------------------------------------------------------------- |
-| `gh`                | Fetch a GitHub PR (`gh pr view`), read logins (`gh auth status`, `gh auth token`) |
-| `glab`              | Fetch a GitLab merge request and its approvals (`glab api`)      |
+| `gh`                | Fetch a GitHub PR (`gh pr view`), find stack members (`gh pr list --head` / `--base`), read logins (`gh auth status`, `gh auth token`) |
+| `glab`              | Fetch a GitLab merge request and its approvals, find stack members (`glab api …/merge_requests?source_branch=` / `?target_branch=`) |
 | The title command   | Once per ticket key per fetch, when you set one                  |
 | `$BROWSER`, `uname`, `explorer.exe`, `open` or `xdg-open` | When you click a ref or a CI cell, or run `/my-pr-links open` |
 
@@ -189,7 +197,8 @@ The mod runs these commands as you, with no shell:
 
 - Rule 5 compares branch names only. GitHub web-editor branches such as `patch-1` in different repos can form one shared-branch group.
 - Lowercase ticket keys such as `eng-123` are not supported.
-- The band shows only PRs that a tool call in this session created or updated, or that you added with `add`. It does not search your accounts for other PRs.
+- The band shows the PRs of this session only (a tool call created or updated them, or you added them with `add`), plus the untracked PRs in the branch chain of such a PR (see [Stacked PRs](#stacked-prs)). It never searches your accounts for other PRs.
+- The chain follows branch names in one repo. It does not read GitLab merge request dependencies, links across repos, or stack tools.
 
 ## Development
 

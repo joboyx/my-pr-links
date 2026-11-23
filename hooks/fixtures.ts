@@ -5,16 +5,25 @@
  */
 
 import type {
+  GithubPrListItem,
   GithubPrView,
   GithubReview,
   GitlabMrApprovals,
   GitlabMrItem,
+  GitlabMrListItem,
 } from './prs';
 
 /**
  * One Bash call of a session and the result text the model read.
  */
 export type SessionCall = { command: string; result: string };
+
+/**
+ * One entry of `glab api projects/:id/merge_requests?…`: the single-MR
+ * fields less the head pipeline, plus the project ids.
+ */
+export type GitlabMrListEntry = Omit<GitlabMrItem, 'head_pipeline'> &
+  GitlabMrListItem & { id: number; project_id: number };
 
 /**
  * `glab api projects/:id/merge_requests/41`: ready to merge, pipeline passed.
@@ -170,6 +179,139 @@ export const GITLAB_NO_RULE_APPROVALS: GitlabMrApprovals = {
   approvals_required: 0,
   approvals_left: 0,
   approved_by: [{ user: { username: 'reviewer-ana' } }],
+};
+
+/**
+ * `glab api projects/:id/merge_requests/43`: stacked on !42, CI running.
+ */
+export const GITLAB_MR_43: GitlabMrItem = {
+  iid: 43,
+  title: 'feat(SHOP-214): add jitter to the checkout backoff',
+  description: '',
+  source_branch: 'feature/SHOP-214-jitter',
+  target_branch: 'feature/SHOP-214-backoff',
+  draft: false,
+  state: 'opened',
+  detailed_merge_status: 'ci_still_running',
+  web_url: 'https://gitlab.com/acme/platform/shop-api/-/merge_requests/43',
+  references: { full: 'acme/platform/shop-api!43' },
+  has_conflicts: false,
+  head_pipeline: {
+    status: 'running',
+    web_url: 'https://gitlab.com/acme/platform/shop-api/-/pipelines/5007',
+  },
+};
+
+/**
+ * A list entry made from a single-MR fixture, in project 1001 unless
+ * `sourceProject` names a fork.
+ */
+function listEntry(mr: GitlabMrItem, sourceProject = 1001): GitlabMrListEntry {
+  const { head_pipeline: _pipeline, ...rest } = mr;
+  return {
+    ...rest,
+    id: 90000 + mr.iid,
+    project_id: 1001,
+    source_project_id: sourceProject,
+    target_project_id: 1001,
+  };
+}
+
+/**
+ * `glab api projects/:id/merge_requests?source_branch=feature%2FSHOP-214-checkout-retry&state=all`:
+ * the open !41 and an older closed !30 from the same branch.
+ */
+export const GITLAB_LIST_CHECKOUT_RETRY: GitlabMrListEntry[] = [
+  listEntry(GITLAB_MR_41),
+  listEntry({
+    ...GITLAB_MR_41,
+    iid: 30,
+    state: 'closed',
+    title: 'feat(SHOP-214): retry checkout (first try)',
+    detailed_merge_status: 'not_open',
+    web_url: 'https://gitlab.com/acme/platform/shop-api/-/merge_requests/30',
+    references: { full: 'acme/platform/shop-api!30' },
+  }),
+];
+
+/**
+ * `glab api projects/:id/merge_requests?target_branch=feature%2FSHOP-214-backoff&state=opened`:
+ * !43 stacked on !42, and !44 from a fork on the same target.
+ */
+export const GITLAB_LIST_ON_BACKOFF: GitlabMrListEntry[] = [
+  listEntry(GITLAB_MR_43),
+  listEntry(
+    {
+      ...GITLAB_MR_43,
+      iid: 44,
+      title: 'feat(SHOP-214): tune the backoff from a fork',
+      source_branch: 'octo-user/backoff-tune',
+      web_url: 'https://gitlab.com/acme/platform/shop-api/-/merge_requests/44',
+      references: { full: 'acme/platform/shop-api!44' },
+    },
+    2002,
+  ),
+];
+
+/**
+ * One `gh pr list -R github.com/acme/web --json …,isCrossRepository` entry,
+ * open and keyless unless `over` says otherwise.
+ */
+function githubListEntry(over: Partial<GithubPrListItem> & { number: number }): GithubPrListItem {
+  return {
+    baseRefName: 'main',
+    body: '',
+    headRefName: `octo-user/change-${over.number}`,
+    isCrossRepository: false,
+    isDraft: false,
+    latestReviews: [],
+    mergeStateStatus: 'BLOCKED',
+    reviewDecision: 'REVIEW_REQUIRED',
+    state: 'OPEN',
+    statusCheckRollup: [],
+    title: `change ${over.number}`,
+    url: `https://github.com/acme/web/pull/${over.number}`,
+    ...over,
+  };
+}
+
+/**
+ * A three-PR stack in acme/web: #301 on `main`, #302 on #301's branch, #303
+ * on #302's branch, plus #304 from a fork on #302's branch.
+ */
+export const GITHUB_STACK = {
+  base: githubListEntry({
+    number: 301,
+    title: 'add the cart API',
+    headRefName: 'octo-user/cart-api',
+    mergeStateStatus: 'CLEAN',
+  }),
+  middle: githubListEntry({
+    number: 302,
+    title: 'add the cart page',
+    headRefName: 'octo-user/cart-ui',
+    baseRefName: 'octo-user/cart-api',
+  }),
+  top: githubListEntry({
+    number: 303,
+    title: 'test the cart page',
+    headRefName: 'octo-user/cart-tests',
+    baseRefName: 'octo-user/cart-ui',
+    statusCheckRollup: [
+      {
+        status: 'IN_PROGRESS',
+        conclusion: '',
+        detailsUrl: 'https://github.com/acme/web/actions/runs/8/job/80',
+      },
+    ],
+  }),
+  fork: githubListEntry({
+    number: 304,
+    title: 'fix a typo on the cart page',
+    headRefName: 'octo-user/cart-typo',
+    baseRefName: 'octo-user/cart-ui',
+    isCrossRepository: true,
+  }),
 };
 
 /**

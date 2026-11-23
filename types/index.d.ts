@@ -30,6 +30,7 @@ export type BandPr = {
   ticket?: string;
   stackedOn?: string;
   stackBase?: string;
+  stackOf?: string;
   note?: string;
 };
 

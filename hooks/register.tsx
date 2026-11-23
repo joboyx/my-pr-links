@@ -16,31 +16,40 @@ import {
   trackedUrls,
   fromGithub,
   fromGitlab,
+  githubStackCandidates,
+  gitlabStackCandidates,
   hasHeaders,
   hoverScopeOf,
   isFinished,
   isReadyUnapproved,
   listText,
   LOOK,
+  needsFastRefresh,
   nextOf,
   outcomeOf,
   parsePrUrl,
+  rowMarkOf,
+  stackMembersOf,
 } from './prs';
 import type {
   Announced,
+  GithubPrListItem,
   GithubPrView,
   GitlabMrApprovals,
   GitlabMrItem,
+  GitlabMrListItem,
   Pr,
   PrGroup,
   PrLink,
   Next,
   Snapshot,
+  StackLookup,
 } from './prs';
 
 /**
  * PR band: the pull requests (GitHub PRs and GitLab merge requests) this session
- * (or one of its subagents) created or updated, above the prompt, grouped by
+ * (or one of its subagents) created or updated, plus the untracked PRs in
+ * their branch chains (marked `in stack`), above the prompt, grouped by
  * ticket key or shared source branch and fetched one by one with `glab` and
  * `gh`. Click a PR to open it in the host browser, or its CI cell to open
  * the pipeline or checks page; `list` prints the full titles. A toast says
@@ -70,10 +79,12 @@ const ARGUMENT_HINT = '[list | refresh | open <ref> [ci] | add <url>]';
 
 const GITHUB_VIEW_FIELDS =
   'number,title,body,url,isDraft,state,headRefName,baseRefName,reviewDecision,statusCheckRollup,mergeStateStatus,latestReviews';
+// The chain lookup also reads whether a PR comes from a fork.
+const GITHUB_LIST_FIELDS = `${GITHUB_VIEW_FIELDS},isCrossRepository`;
 
 const isHidden = atom({ plugin: 'my-pr-links', key: 'isHidden' } as const, false);
 const snapshot = atom({ plugin: 'my-pr-links', key: 'snapshot' } as const, null, {
-  shape: 'prs-4',
+  shape: 'prs-5',
 });
 const created = atom({ plugin: 'my-pr-links', key: 'created' } as const, []);
 
@@ -276,29 +287,140 @@ async function githubRunAs(
 }
 
 /**
- * Fetches one GitHub pull request with its checks and review decision, as
- * each candidate account in turn until one can read it. When every account
- * fails, the first attempt's error line; with no account to try, one plain
- * call as the active account.
+ * Runs one `gh` JSON call about a repo of `link`'s owner as each candidate
+ * account in turn until one succeeds. When every account fails, the first
+ * attempt's error line; with no account to try, one plain call as the active
+ * account; `undefined` when `gh` cannot start.
  */
-async function fetchGithub($: EngineInterface, link: PrLink, auth: GithubAuth): Promise<PrResult> {
-  const argv = ['gh', 'pr', 'view', link.url, '--json', GITHUB_VIEW_FIELDS];
+async function githubJson(
+  $: EngineInterface,
+  link: PrLink,
+  auth: GithubAuth,
+  argv: string[],
+): Promise<JsonResult | undefined> {
   const owner = link.projectPath.split('/')[0] ?? '';
   let firstError: string | undefined;
   for (const login of githubCandidatesOf(auth, owner)) {
     const init = await githubRunAs($, auth, login);
     if (!init) continue;
     const found = await jsonCall($, argv, init);
-    if (!found) return {};
-    if ('value' in found) return mapped('gh', link, () => fromGithub(found.value as GithubPrView));
+    if (!found || 'value' in found) return found;
     firstError ??= found.error;
   }
   if (firstError) return { error: firstError };
+  return jsonCall($, argv);
+}
 
-  const found = await jsonCall($, argv);
+/**
+ * Fetches one GitHub pull request with its checks and review decision, as
+ * an account that can read it (see `githubJson`).
+ */
+async function fetchGithub($: EngineInterface, link: PrLink, auth: GithubAuth): Promise<PrResult> {
+  const argv = ['gh', 'pr', 'view', link.url, '--json', GITHUB_VIEW_FIELDS];
+  const found = await githubJson($, link, auth, argv);
   if (!found) return {};
   if ('error' in found) return { error: found.error };
   return mapped('gh', link, () => fromGithub(found.value as GithubPrView));
+}
+
+/**
+ * The chain lookup of a GitHub repo (`gh pr list -R`): `--head <branch>
+ * --state all` for a parent, `--base <branch> --state open` for children,
+ * with the view fields plus `isCrossRepository`.
+ */
+function githubLookup(
+  $: EngineInterface,
+  link: PrLink,
+  auth: GithubAuth,
+): StackLookup<GithubPrListItem> {
+  return async ({ by, branch }) => {
+    const found = await githubJson($, link, auth, [
+      'gh',
+      'pr',
+      'list',
+      '-R',
+      `${link.host}/${link.projectPath}`,
+      by === 'source' ? '--head' : '--base',
+      branch,
+      '--state',
+      by === 'source' ? 'all' : 'open',
+      '--json',
+      GITHUB_LIST_FIELDS,
+    ]);
+    return found && 'value' in found ? githubStackCandidates(found.value) : undefined;
+  };
+}
+
+/**
+ * The chain lookup of a GitLab project (`glab api …/merge_requests?`):
+ * `source_branch=<branch>&state=all` for a parent,
+ * `target_branch=<branch>&state=opened` for children.
+ */
+function gitlabLookup($: EngineInterface, link: PrLink): StackLookup<GitlabMrListItem> {
+  const path = `projects/${encodeURIComponent(link.projectPath)}/merge_requests`;
+  return async ({ by, branch }) => {
+    const query =
+      by === 'source'
+        ? `source_branch=${encodeURIComponent(branch)}&state=all`
+        : `target_branch=${encodeURIComponent(branch)}&state=opened`;
+    const found = await jsonCall($, glabApi(link, `${path}?${query}`));
+    return found && 'value' in found ? gitlabStackCandidates(found.value) : undefined;
+  };
+}
+
+/**
+ * The untracked PRs in the branch chain of one tracked PR (see
+ * `stackMembersOf`), as rows marked with `stackOf`. A GitHub member's row
+ * comes from the list output; a GitLab member is fetched like a tracked MR,
+ * for its pipeline and approvals. PRs in `known` (tracked) are left out.
+ * Any failed call gives no members for this PR and no error line.
+ */
+async function membersOf(
+  $: EngineInterface,
+  pr: Pr,
+  auth: GithubAuth,
+  known: ReadonlySet<string>,
+): Promise<Pr[]> {
+  const link = parsePrUrl(pr.url);
+  if (!link) return [];
+  const mark = (m: Pr): Pr => ({ ...m, stackOf: pr.url });
+
+  if (link.provider === 'github') {
+    const found = await stackMembersOf(pr, githubLookup($, link, auth));
+    try {
+      return (found ?? []).filter((c) => !known.has(c.url)).map((c) => mark(fromGithub(c.item)));
+    } catch {
+      return [];
+    }
+  }
+
+  const found = await stackMembersOf(pr, gitlabLookup($, link));
+  const fresh = (found ?? []).filter((c) => !known.has(c.url));
+  const links = fresh.flatMap((c) => {
+    const parsed = parsePrUrl(c.url);
+    return parsed ? [parsed] : [];
+  });
+  if (links.length !== fresh.length) return [];
+  const results = await Promise.all(links.map((l) => fetchGitlab($, l)));
+  const rows = results.flatMap((r) => (r.pr ? [mark(r.pr)] : []));
+  return rows.length === results.length ? rows : [];
+}
+
+/**
+ * The stack members of every tracked PR, each once: a member two tracked PRs
+ * share keeps the first finder; a tracked PR is never a member.
+ */
+async function stackMembers(
+  $: EngineInterface,
+  tracked: Pr[],
+  urls: readonly string[],
+  auth: GithubAuth,
+): Promise<Pr[]> {
+  const known = new Set([...urls, ...tracked.map((m) => m.url)]);
+  const found = await Promise.all(tracked.map((pr) => membersOf($, pr, auth, known)));
+  const byUrl = new Map<string, Pr>();
+  for (const m of found.flat()) if (!byUrl.has(m.url)) byUrl.set(m.url, m);
+  return [...byUrl.values()];
 }
 
 /**
@@ -350,10 +472,11 @@ async function ticketTitles(
 }
 
 /**
- * Fetches each created PR, groups them with the stack bases of the previous
+ * Fetches each created PR, then the untracked PRs in their branch chains
+ * (stack members), groups them with the stack bases of the previous
  * snapshot, and saves the snapshot to the state the band draws. Toasts the
- * PRs that merged, closed, failed CI or became ready to merge since the
- * previous snapshot. `titleOption` is the `task_title_cmd` option, empty
+ * tracked PRs that merged, closed, failed CI or became ready to merge since
+ * the previous snapshot. `titleOption` is the `task_title_cmd` option, empty
  * when unset.
  */
 async function fetchSnapshot(
@@ -364,8 +487,9 @@ async function fetchSnapshot(
   const fetchedAt = await $.clock.now();
   const auth = await githubAuthOf($, urls);
   const results = await Promise.all(urls.map((url) => fetchPr($, url, auth)));
-  const prs = results.flatMap((r) => (r.pr ? [r.pr] : []));
+  const tracked = results.flatMap((r) => (r.pr ? [r.pr] : []));
   const errors = [...new Set(results.flatMap((r) => (r.error ? [r.error] : [])))];
+  const prs = [...tracked, ...(await stackMembers($, tracked, urls, auth))];
 
   const keys = [...new Set(prs.flatMap((m) => (m.ticket ? [m.ticket] : [])))];
   // The previous snapshot keeps a stacked PR after its base once the base merged.
@@ -480,12 +604,12 @@ async function backfill($: EngineInterface, titleOption: string): Promise<void> 
 }
 
 /**
- * How old the snapshot may get before a refresh: 1 minute while any PR in it
- * has CI running or is ready to merge, else 3 minutes.
+ * How old the snapshot may get before a refresh: 1 minute while a tracked PR
+ * in it has CI running or is ready to merge (`needsFastRefresh`), else 3
+ * minutes.
  */
 function staleAfterOf(snap: Snapshot): number {
-  const isActive = allPrs(snap).some((m) => m.state === 'running' || m.state === 'ready');
-  return isActive ? ACTIVE_STALE_MS : STALE_MS;
+  return needsFastRefresh(allPrs(snap)) ? ACTIVE_STALE_MS : STALE_MS;
 }
 
 /**
@@ -748,14 +872,13 @@ export const register: Register = (on, options) => {
     );
     // A plain list shows the age on its first row; a list with headers, on the first header.
     const ageRow = headed ? undefined : rowPrs[0];
-    const stackMarkOf = (m: Pr) => (m.stackedOn ? `⧗ after ${m.stackedOn}` : '');
-    // The state column (label, age, ⧗ mark) has one width on every row, and the note
+    // The state column (label, age, ⧗ and in-stack marks) has one width on every row, and the note
     // only takes the room left over, so neither cuts one row's title shorter than
     // another's: the title, CI, approvals and state columns line up on every row.
     const stateWidth = Math.max(
       0,
       ...rowPrs.map((m) => {
-        const mark = stackMarkOf(m);
+        const mark = rowMarkOf(m);
         return (
           LOOK[m.state].label.length +
           (m === ageRow ? ` · ${age}`.length : 0) +
@@ -774,6 +897,9 @@ export const register: Register = (on, options) => {
       const ci = m.ci ? CI_TEXT[m.ci] : '';
       // A closed row is dim except its icon and label; a finished row hides its stale note.
       const isClosed = m.state === 'closed';
+      // A stack member (not touched by the session) has a dim ref and title too.
+      const isDim = isClosed || Boolean(m.stackOf);
+      const mark = rowMarkOf(m);
       const showsNote = m.state !== 'draft' && m.state !== 'merged' && !isClosed;
       const ciCell = isClosed ? (
         <Text dimColor>{ci.padEnd(4)}</Text>
@@ -791,7 +917,7 @@ export const register: Register = (on, options) => {
             <Box width={refWidth} flexShrink={0}>
               <Markdown
                 key={`link-${rowId}`}
-                dimColor={isClosed}
+                dimColor={isDim}
                 text={`[${m.ref}](${m.url})`}
                 onLinkPress={(link) => void openPr($, link.href)}
               />
@@ -803,7 +929,7 @@ export const register: Register = (on, options) => {
           <Box key={`title-${rowId}`} width={titleWidth} flexShrink={1}>
             <Text
               wrap="truncate-end"
-              dimColor={isClosed}
+              dimColor={isDim}
               hover={{ scope: hoverScopeOf(rowId), inverse: true }}
             >
               {m.rowTitle}
@@ -832,9 +958,9 @@ export const register: Register = (on, options) => {
               <Text color={look.color}>{look.label}</Text>
               {ageText(showsAge)}
             </Box>
-            {m.stackedOn ? (
+            {mark ? (
               <Box flexShrink={0}>
-                <Text dimColor>{stackMarkOf(m)}</Text>
+                <Text dimColor>{mark}</Text>
               </Box>
             ) : null}
           </Box>
@@ -864,8 +990,9 @@ export const register: Register = (on, options) => {
       }
 
       const rows: RenderChildren[] = drawnPrsOf(group).map((m) => prRow(group, m, false));
+      // Both come from tracked PRs: a group of stack members only shows neither.
       const step = nextOf(group);
-      const outcome = isFinished(group) ? outcomeOf(group) : undefined;
+      const outcome = step && isFinished(group) ? outcomeOf(group) : undefined;
 
       return (
         <Box key={key} flexDirection="column">
@@ -883,11 +1010,11 @@ export const register: Register = (on, options) => {
             <Box flexShrink={0}>
               {outcome ? (
                 <Text color={outcome.color}>{outcome.text}</Text>
-              ) : (
+              ) : step ? (
                 <Text color={NEXT_LOOK[step.kind].color} bold={NEXT_LOOK[step.kind].bold}>
                   ▸ {step.text}
                 </Text>
-              )}
+              ) : null}
               {ageText(first)}
             </Box>
           </Box>

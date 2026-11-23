@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`my-pr-links` is a Claude Code mod. It draws a band above the prompt that lists the pull requests (GitHub PRs via `gh`, GitLab merge requests via `glab`) that the session and its subagents created or updated.
+`my-pr-links` is a Claude Code mod. It draws a band above the prompt that lists the pull requests (GitHub PRs via `gh`, GitLab merge requests via `glab`) that the session and its subagents created or updated, plus the untracked PRs in their branch chains (stack members, marked `in stack`).
 The plugin lives at the repo root. User docs are in `README.md`.
 
 ## Layout
@@ -11,8 +11,8 @@ The plugin lives at the repo root. User docs are in `README.md`.
 | `.claude-plugin/marketplace.json` | Marketplace `my-pr-links` with one plugin, `source: "./"`                                           |
 | `.claude-plugin/types/`           | Mod API types that Claude Code generates; git-ignored (see below)                                   |
 | `hooks/hooks.json`                | Hook module list                                                                                    |
-| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, band render, link open                                        |
-| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, change toasts, `$BROWSER` argv |
+| `hooks/register.tsx`              | Command, `tool.call` tracking, fetch, stack-member lookups, band render, link open                  |
+| `hooks/prs.ts`                    | Pure logic: URL parse, `gh`/`glab` JSON to rows, group keys, titles, stack chain search, change toasts, `$BROWSER` argv |
 | `hooks/fixtures.ts`               | Test data in the shape of `gh` and `glab api` JSON output                                           |
 | `hooks/*.test.ts`                 | Unit tests                                                                                          |
 | `types/index.d.ts`                | Types of the plugin's own state (`PluginState`)                                                     |
@@ -47,6 +47,14 @@ A ticket key matches `[A-Z][A-Z0-9]{1,9}-\d+`. The first rule that matches gives
 Keys in running text never count. A key whose letter part is `CVE`, `UTF`, `SHA`, `ISO`, `HTTP`, `RFC`, `TLS`, `MD` or `GHSA` never counts in any rule (`STANDARD_PREFIXES` in `hooks/prs.ts`). Lowercase keys (`eng-123`) are not supported. Only a lowercase word is a conventional-commit type.
 The description is read for rule 4 in `fromGitlab` / `fromGithub` and is not stored. A change to the stored `Pr` shape bumps the `shape` tag of the `snapshot` atom in `hooks/register.tsx`.
 Groups show first. Keyless PRs go under a bare `other` header when a group exists. With no group, the band is a plain list with no header.
+
+## Stack members
+
+- Scope exception: the band shows the session's PRs plus the untracked PRs in the branch chain of a tracked PR. It never searches the user's accounts.
+- `stackMembersOf` in `hooks/prs.ts` walks the chain (same repo, both ways) through an injected lookup; `register.tsx` supplies the `gh pr list` / `glab api` lookups. The default branches of rule 5 never link a chain. Forks never count.
+- A member carries `stackOf` (the URL of the tracked PR that found it). It is derived on each fetch, never added to `created`, never toasted, and never counted toward rule 5.
+- Members are for visibility only: `nextOf` (header next action, "you …" text), the group rank and `needsFastRefresh` read tracked PRs only. A group of members only (a member with its own ticket key) has no next action and sorts after the groups with tracked work. The fold-past-12 count includes members.
+- Any failed lookup gives that tracked PR no members on that fetch, with no error line, like a failed approvals call.
 
 ## Title command contract
 

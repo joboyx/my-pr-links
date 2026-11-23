@@ -10,6 +10,10 @@ import {
   GITLAB_MR_17,
   GITLAB_MR_41,
   GITLAB_MR_42,
+  GITLAB_MR_43,
+  GITHUB_STACK,
+  GITLAB_LIST_CHECKOUT_RETRY,
+  GITLAB_LIST_ON_BACKOFF,
   SESSION_CREATE_CALLS,
 } from './fixtures';
 import type { GithubPrView, GitlabMrItem } from './prs';
@@ -84,9 +88,12 @@ type Answer = { exitCode?: number; stdout?: string; stderr?: string } | 'missing
  * answers the title command; `uname` is what `uname -sr` prints (a WSL
  * kernel when unset); `missing` lists the binaries that cannot start;
  * `tools` answers other binaries by name; `env` is the environment the
- * plugin reads; `mrs` adds shop-api MRs, answered by iid.
+ * plugin reads; `mrs` adds shop-api MRs, answered by iid; `lists` answers
+ * chain lookups: a `glab api` path such as `<SHOP_API>?source_branch=…`, or
+ * `gh pr list` by `<-R value> <--head|--base> <branch>`.
  */
 type Hosts = {
+  lists?: Record<string, unknown>;
   glab?: Answer;
   gh?: Answer;
   ghAuth?: Answer;
@@ -136,6 +143,10 @@ function answerOf(argv: readonly string[], hosts: Hosts, env?: Record<string, st
   if (tool && hosts.missing?.includes(tool)) return 'missing';
   const own = tool ? hosts.tools?.[tool] : undefined;
   if (own) return own;
+  const listKey =
+    tool === 'gh' && sub === 'pr' && path === 'list' ? argv.slice(4, 7).join(' ') : path;
+  const list = tool === 'glab' || tool === 'gh' ? hosts.lists?.[listKey] : undefined;
+  if (list) return ok(list);
   if (tool === TITLE_CMD) return hosts.title ?? { stdout: 'Checkout retries\nsecond line\n' };
   if (tool === OPTION_TITLE_CMD) return { stdout: 'Checkout retries from the option\n' };
   if (tool === 'glab' && hosts.glab) return hosts.glab;
@@ -788,7 +799,7 @@ test('a PR whose JSON has an unexpected shape shows an error line; the other PRs
  */
 function viewsOf(runs: Run[]): { url: string | undefined; token: string | undefined }[] {
   return runs
-    .filter((r) => r.argv[0] === 'gh' && r.argv[1] === 'pr')
+    .filter((r) => r.argv[0] === 'gh' && r.argv[1] === 'pr' && r.argv[2] === 'view')
     .map((r) => ({ url: r.argv[3], token: r.env?.GH_TOKEN }));
 }
 
@@ -1509,4 +1520,212 @@ test('/my-pr-links list prints the snapshot, even with the band hidden', async (
     ].join('\n'),
   );
   expect(ran.filter((argv) => argv[2] === `${SHOP_API}/42`)).toHaveLength(fetches);
+});
+
+const WEB_REPO = 'github.com/acme/web';
+
+/**
+ * The `gh pr list` answers of the acme/web stack (see `GITHUB_STACK`), by
+ * `-R`, flag and branch; `leave` drops one, so that lookup fails.
+ */
+function githubStackLists(leave?: string): Record<string, unknown> {
+  const { base, middle, top, fork } = GITHUB_STACK;
+  const lists: Record<string, unknown> = {
+    [`${WEB_REPO} --head octo-user/cart-api`]: [base],
+    [`${WEB_REPO} --base octo-user/cart-api`]: [middle],
+    [`${WEB_REPO} --base octo-user/cart-ui`]: [top, fork],
+    [`${WEB_REPO} --base octo-user/cart-tests`]: [],
+  };
+  if (leave) delete lists[leave];
+  return lists;
+}
+
+/**
+ * The `glab api` answers of the shop-api stack: !41 (and a closed !30) under
+ * !42, !43 (and a fork's !44) on top of it, nothing on top of !43.
+ */
+const GITLAB_STACK_LISTS: Record<string, unknown> = {
+  [`${SHOP_API}?source_branch=feature%2FSHOP-214-checkout-retry&state=all`]:
+    GITLAB_LIST_CHECKOUT_RETRY,
+  [`${SHOP_API}?target_branch=feature%2FSHOP-214-backoff&state=opened`]: GITLAB_LIST_ON_BACKOFF,
+  [`${SHOP_API}?target_branch=feature%2FSHOP-214-jitter&state=opened`]: [],
+};
+
+/**
+ * The dim mark text in each drawn row's state column, by row ref, in row order.
+ */
+async function marksOf(ui: { findAll: (q: { type: string }) => Promise<FoundElement[]> }) {
+  const boxes = await ui.findAll({ type: 'Box' });
+  return boxes
+    .filter((b) => b.key?.startsWith('state-'))
+    .map((b) => {
+      const ref = b.key!.split('-').at(-1);
+      const label = /(?:ready to merge|in review|CI running|CI failed|draft|merged|closed)(?: · just now)?/;
+      return `${ref} ${b.text.replace(label, '').trim() || '-'}`;
+    });
+}
+
+test('a GitHub PR shows its untracked parent and child in chain order, marked in stack', async ($, on) => {
+  const { middle } = GITHUB_STACK;
+  const { ran, clock } = hostsFor(on, {
+    views: { [middle.url]: middle },
+    lists: githubStackLists(),
+  });
+  toolsFor(on);
+  const run = (args: string) => $.command.run({ command: 'my-pr-links', args, ...COMPOSER });
+
+  await run(`add ${middle.url}`);
+  await clock.settle();
+
+  expect(ran).toContainEqual([
+    'gh', 'pr', 'list', '-R', WEB_REPO, '--head', 'octo-user/cart-api', '--state', 'all',
+    '--json', `${ran.find((a) => a[2] === 'view')?.[5]},isCrossRepository`,
+  ]);
+  expect(ran).toContainEqual([
+    'gh', 'pr', 'list', '-R', WEB_REPO, '--base', 'octo-user/cart-ui', '--state', 'open',
+    '--json', expect.any(String),
+  ]);
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  // The fork's #304 targets the same branch and never shows.
+  expect(await marksOf(ui)).toEqual(['301 in stack', '302 ⧗ after #301', '303 ⧗ after #302 · in stack']);
+  expect((await ui.find({ type: 'Markdown', text: /\[#301\]/ }))?.props).toMatchObject({ dimColor: true });
+  expect((await ui.find({ type: 'Markdown', text: /\[#302\]/ }))?.props).toMatchObject({ dimColor: false });
+  expect((await ui.find({ type: 'Text', text: 'add the cart API' }))?.props).toMatchObject({ dimColor: true });
+  // A member row carries its own status data.
+  expect((await ui.find({ type: 'Text', text: 'CI …' }))?.props).toMatchObject({ color: 'warning' });
+
+  // Members are not session PRs: the count and `created` stay at one.
+  expect((await run('refresh')).text).toBe('1 PRs from this session');
+  const list = (await run('list')).text ?? '';
+  expect(list).toContain(
+    '- ◉ [#301](https://github.com/acme/web/pull/301) web — add the cart API · ready to merge · 👍 0 · in stack',
+  );
+  expect(list).toContain('- ○ [#302](https://github.com/acme/web/pull/302) web — add the cart page · in review · 👍 0\n');
+  expect(list).not.toMatch(/#304/);
+});
+
+test('a tracked PR in another tracked PR\'s chain shows once, unmarked', async ($, on) => {
+  const { base, middle } = GITHUB_STACK;
+  const { clock } = hostsFor(on, {
+    views: { [base.url]: base, [middle.url]: middle },
+    lists: githubStackLists(),
+  });
+  toolsFor(on);
+
+  await $.command.run({ command: 'my-pr-links', args: `add ${base.url}`, ...COMPOSER });
+  await $.command.run({ command: 'my-pr-links', args: `add ${middle.url}`, ...COMPOSER });
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  // Both tracked PRs find #303; it shows once.
+  expect(await marksOf(ui)).toEqual(['301 -', '302 ⧗ after #301', '303 ⧗ after #302 · in stack']);
+});
+
+test('a PR on a default branch looks up no parent, and a PR from one no children', async ($, on) => {
+  const { ran, clock } = hostsFor(on, {
+    views: { [PR_88]: { ...GITHUB_88_VIEW, headRefName: 'develop', baseRefName: 'main' } },
+  });
+  toolsFor(on);
+
+  await $.tool.call({ tool: 'Bash', command: 'gh pr create --fill' });
+  await clock.settle();
+
+  expect(ran.some((argv) => argv[2] === 'list')).toBe(false);
+});
+
+test('a failed chain lookup adds no member and no error line; the tracked row stays', async ($, on) => {
+  const { middle } = GITHUB_STACK;
+  const { ran, clock } = hostsFor(on, {
+    views: { [middle.url]: middle },
+    lists: githubStackLists(`${WEB_REPO} --base octo-user/cart-tests`),
+  });
+  toolsFor(on);
+
+  await $.command.run({ command: 'my-pr-links', args: `add ${middle.url}`, ...COMPOSER });
+  await clock.settle();
+
+  // The parent lookup worked, the last child lookup failed: no partial chain shows.
+  expect(ran.some((argv) => argv.includes('--head'))).toBe(true);
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await ui.find({ text: /\[#302\]/ })).toBeDefined();
+  expect(await ui.find({ text: /\[#301\]|\[#303\]/ })).toBeUndefined();
+  expect(await ui.find({ text: /⚠/ })).toBeUndefined();
+});
+
+test('a GitLab MR shows its untracked parent and child in its ticket group, fetched with approvals', async ($, on) => {
+  const { ran, clock } = hostsFor(on, { lists: GITLAB_STACK_LISTS, mrs: [GITLAB_MR_43] });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await clock.settle();
+
+  expect(ran).toContainEqual(['glab', 'api', `${SHOP_API}/41/approvals`]);
+  expect(ran).toContainEqual(['glab', 'api', `${SHOP_API}/43`]);
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  const group = await ui.find({ key: 'group-ticket-SHOP-214' });
+  expect(group?.text).toMatch(/\[!41\][\s\S]*\[!42\][\s\S]*\[!43\]/);
+  // The closed !30 on !41's branch and the fork's !44 never show.
+  expect(group?.text).not.toMatch(/\[!30\]|\[!44\]/);
+  expect(await marksOf(ui)).toEqual(['41 in stack', '42 ⧗ after !41', '43 ⧗ after !42 · in stack']);
+  // !41 is ready to merge, but it is a member: the header names the tracked !42 only.
+  expect(group?.text).toMatch(/^SHOP-214▸ review !42/);
+  expect(await ui.find({ text: /you merge/ })).toBeUndefined();
+  expect(await ui.find({ text: /👍 1\/1/ })).toBeDefined();
+  expect((await $.command.run({ command: 'my-pr-links', args: 'refresh', ...COMPOSER })).text).toBe(
+    '1 PRs from this session',
+  );
+});
+
+test('a GitLab member that cannot be fetched adds no member', async ($, on) => {
+  // No answer for !43: its own fetch fails.
+  const { clock } = hostsFor(on, { lists: GITLAB_STACK_LISTS });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await clock.settle();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await marksOf(ui)).toEqual(['42 -']);
+  expect(await ui.find({ text: /⚠/ })).toBeUndefined();
+});
+
+test('a member whose state changes is not toasted', async ($, on) => {
+  const hosts: Hosts = { lists: GITLAB_STACK_LISTS, mrs: [GITLAB_MR_43] };
+  const { clock } = hostsFor(on, hosts);
+  toolsFor(on);
+  const toasts = toastsFor(on);
+  const refreshNow = () => $.command.run({ command: 'my-pr-links', args: 'refresh', ...COMPOSER });
+
+  await createShopApiPr($);
+  await clock.settle();
+  await refreshNow();
+
+  hosts.mrs = [{ ...GITLAB_MR_43, head_pipeline: { status: 'failed' } }];
+  await refreshNow();
+
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  // The member row shows its failed CI; the header still names the tracked PR's next action.
+  expect((await ui.findAll({ type: 'Text', text: 'CI failed' })).length).toBe(1);
+  expect((await ui.find({ key: 'group-ticket-SHOP-214' }))?.text).toMatch(/^SHOP-214▸ review !42/);
+  expect(toasts).toEqual([]);
+});
+
+test('a member with CI running does not start the fast refresh', async ($, on) => {
+  const { ran, clock } = hostsFor(on, { lists: GITLAB_STACK_LISTS, mrs: [GITLAB_MR_43] });
+  toolsFor(on);
+  sessionFor(on);
+
+  await $.session.start(START);
+  // The fetch starts half a second after the tick time.
+  await clock.advance(500);
+  await createShopApiPr($);
+  await clock.settle();
+  const fetches = () => ran.filter((argv) => argv[2] === `${SHOP_API}/42`).length;
+  expect(fetches()).toBe(1);
+
+  // !43 (a member) runs CI and !41 (a member) is ready; the tracked !42 is in review.
+  await clock.advance(60 * 1000 - 500);
+  expect(fetches()).toBe(1);
+  await clock.advance(2 * 60 * 1000);
+  expect(fetches()).toBe(2);
 });

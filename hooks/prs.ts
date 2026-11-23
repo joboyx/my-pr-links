@@ -71,6 +71,12 @@ export type Pr = {
    * host moved this PR's target branch off a merged base.
    */
   stackBase?: string;
+  /**
+   * URL of the tracked PR whose branch chain found this PR, when the session
+   * did not create, update or add this PR itself (a stack member, see
+   * `stackMembersOf`). Unset on a tracked PR.
+   */
+  stackOf?: string;
   note?: string;
 };
 
@@ -220,6 +226,31 @@ export type GithubPrView = {
 };
 
 /**
+ * One entry of `gh pr list --json <the view fields>,isCrossRepository`: the
+ * view fields, plus whether the head branch lives in a fork.
+ */
+export type GithubPrListItem = GithubPrView & { isCrossRepository?: boolean };
+
+/**
+ * The fields read from one entry of `glab api
+ * projects/:id/merge_requests?source_branch=…` (or `?target_branch=…`). The
+ * list has no head pipeline; the band fetches each member on its own.
+ */
+export type GitlabMrListItem = {
+  iid: number;
+  source_branch: string;
+  target_branch: string;
+  state: string;
+  web_url: string;
+  /**
+   * The project of the source branch; another value than
+   * `target_project_id` means a fork.
+   */
+  source_project_id?: number;
+  target_project_id?: number;
+};
+
+/**
  * One entry of a pull request's `latestReviews`.
  */
 export type GithubReview = {
@@ -254,9 +285,11 @@ export type Next = { kind: 'failing' | 'you' | 'waiting' | 'done'; text: string 
 
 /**
  * Sort rank of a group by its next action: lower sorts first, so what needs
- * attention leads.
+ * attention leads. A group with no next action (members only) ranks after
+ * `done`.
  */
 const URGENCY: Record<Next['kind'], number> = { failing: 0, you: 1, waiting: 2, done: 3 };
+const NO_NEXT_RANK = 4;
 
 const OTHER = 'other';
 
@@ -266,11 +299,20 @@ const OTHER = 'other';
 const isOpen = (m: Pr) => m.state !== 'merged' && m.state !== 'closed';
 
 /**
- * Picks the next action of a group: a failing PR first, then one ready for
- * you to merge, else whatever the first open PR waits on.
+ * Whether the session tracks the PR: it is not a stack member.
  */
-export function nextOf(group: PrGroup): Next {
-  const open = group.prs.filter(isOpen);
+const isTracked = (m: Pr) => !m.stackOf;
+
+/**
+ * Picks the next action of a group from its tracked PRs only (stack members
+ * are shown for visibility): a failing PR first, then one ready for you to
+ * merge, else whatever the first open PR waits on. `undefined` for a group
+ * of stack members only.
+ */
+export function nextOf(group: PrGroup): Next | undefined {
+  const tracked = group.prs.filter(isTracked);
+  if (tracked.length === 0) return undefined;
+  const open = tracked.filter(isOpen);
   const failing = open.find((m) => m.state === 'failing');
   if (failing) return { kind: 'failing', text: `fix CI ${failing.ref}` };
   const ready = open.find((m) => m.state === 'ready');
@@ -329,6 +371,14 @@ const DEFAULT_BRANCHES = new Set([
   'staging',
   'production',
 ]);
+
+/**
+ * Whether a branch is a work branch: named, and not a default branch such as
+ * `main` (any case). Only a work branch forms a shared-branch group or a
+ * link of a stack.
+ */
+const isWorkBranch = (branch: string) =>
+  Boolean(branch) && !DEFAULT_BRANCHES.has(branch.toLowerCase());
 
 /**
  * A title split as a conventional commit: its type, its scopes (the raw
@@ -687,10 +737,7 @@ function groupKeysOf(prs: Pr[]): Map<Pr, GroupKey> {
   const keyless = prs.filter((m) => !m.ticket);
   const branchCount = new Map<string, number>();
   for (const m of keyless) branchCount.set(m.sourceBranch, (branchCount.get(m.sourceBranch) ?? 0) + 1);
-  const isShared = (branch: string) =>
-    Boolean(branch) &&
-    !DEFAULT_BRANCHES.has(branch.toLowerCase()) &&
-    (branchCount.get(branch) ?? 0) >= 2;
+  const isShared = (branch: string) => isWorkBranch(branch) && (branchCount.get(branch) ?? 0) >= 2;
 
   return new Map(
     prs.map((m): [Pr, GroupKey] => [
@@ -737,10 +784,211 @@ function stackOrder(prs: Pr[]): Pr[] {
 }
 
 /**
+ * The row mark of a stack member: a PR the band shows because it is in the
+ * branch chain of a tracked PR, not because the session touched it.
+ */
+export const STACK_MEMBER_MARK = 'in stack';
+
+/**
+ * The dim mark in a row's state column: `⧗ after <ref>` for a PR stacked on
+ * an open PR, `in stack` for a stack member, both joined by ` · `, or empty.
+ */
+export function rowMarkOf(m: Pr): string {
+  const marks = [m.stackedOn ? `⧗ after ${m.stackedOn}` : '', m.stackOf ? STACK_MEMBER_MARK : ''];
+  return marks.filter(Boolean).join(' · ');
+}
+
+/**
+ * How many links the chain search follows in each direction from one
+ * tracked PR: parent after parent, or child level after child level.
+ */
+export const MAX_STACK_DEPTH = 10;
+
+/**
+ * How many stack members one tracked PR's chain search keeps at most.
+ */
+export const MAX_STACK_MEMBERS = 20;
+
+/**
+ * One PR a chain lookup found, in the fields the chain search reads, plus
+ * the raw `item` the band turns into a row.
+ */
+export type StackCandidate<T> = {
+  number: number;
+  url: string;
+  sourceBranch: string;
+  targetBranch: string;
+  state: 'open' | 'merged' | 'closed';
+  /**
+   * Whether the source branch lives in a fork, another repo than the target.
+   */
+  isFork: boolean;
+  item: T;
+};
+
+/**
+ * One chain lookup in the repo of a tracked PR: the PRs whose source branch
+ * is `branch` in any state (`by: 'source'`, for a parent), or the open PRs
+ * whose target branch is `branch` (`by: 'target'`, for children). Resolves
+ * `undefined` when the call failed.
+ */
+export type StackLookup<T> = (query: {
+  by: 'source' | 'target';
+  branch: string;
+}) => Promise<StackCandidate<T>[] | undefined>;
+
+/**
+ * The parent among `candidates` for a PR whose target is `branch`: a PR of
+ * the same repo (no fork) whose source branch is `branch`, open before
+ * merged (a closed PR never counts), then the newest; never `selfUrl`.
+ */
+function parentOf<T>(
+  candidates: StackCandidate<T>[],
+  branch: string,
+  selfUrl: string,
+): StackCandidate<T> | undefined {
+  return candidates
+    .filter((c) => c.sourceBranch === branch && !c.isFork && c.state !== 'closed' && c.url !== selfUrl)
+    .sort((a, b) => Number(b.state === 'open') - Number(a.state === 'open') || b.number - a.number)[0];
+}
+
+/**
+ * The children among `candidates` of a PR whose source is `branch`: open PRs
+ * of the same repo (no fork) that target `branch`, by number.
+ */
+function childrenOf<T>(candidates: StackCandidate<T>[], branch: string): StackCandidate<T>[] {
+  return candidates
+    .filter((c) => c.targetBranch === branch && !c.isFork && c.state === 'open')
+    .sort((a, b) => a.number - b.number);
+}
+
+/**
+ * The untracked PRs in the branch chain of one tracked PR, in the same repo:
+ * a child's target branch is its parent's source branch. Parents first,
+ * nearest first: while the target branch is a work branch (not `main`,
+ * `develop` and the like), the PR whose source is that branch. Then the
+ * children, level by level: the open PRs that target this PR's source
+ * branch, and theirs in turn, while that source is a work branch. A branch
+ * already seen ends that path, so a cycle stops. Each direction follows at
+ * most `MAX_STACK_DEPTH` links, and the search keeps at most
+ * `MAX_STACK_MEMBERS` PRs. Forks never count. Resolves `undefined` when any
+ * lookup failed, so a partial chain never shows.
+ */
+export async function stackMembersOf<T>(
+  root: Pick<Pr, 'url' | 'sourceBranch' | 'targetBranch'>,
+  lookup: StackLookup<T>,
+): Promise<StackCandidate<T>[] | undefined> {
+  const seen = new Set([root.sourceBranch]);
+  const found: StackCandidate<T>[] = [];
+  const isFull = () => found.length >= MAX_STACK_MEMBERS;
+
+  let target = root.targetBranch;
+  for (let depth = 0; depth < MAX_STACK_DEPTH && !isFull(); depth++) {
+    if (!isWorkBranch(target) || seen.has(target)) break;
+    const candidates = await lookup({ by: 'source', branch: target });
+    if (!candidates) return undefined;
+    const parent = parentOf(candidates, target, root.url);
+    if (!parent) break;
+    seen.add(target);
+    found.push(parent);
+    target = parent.targetBranch;
+  }
+
+  let level = isWorkBranch(root.sourceBranch) ? [root.sourceBranch] : [];
+  for (let depth = 0; depth < MAX_STACK_DEPTH && level.length > 0 && !isFull(); depth++) {
+    const next: string[] = [];
+    for (const branch of level) {
+      if (isFull()) break;
+      const candidates = await lookup({ by: 'target', branch });
+      if (!candidates) return undefined;
+      for (const child of childrenOf(candidates, branch)) {
+        if (isFull()) break;
+        if (child.url === root.url || seen.has(child.sourceBranch)) continue;
+        seen.add(child.sourceBranch);
+        found.push(child);
+        if (isWorkBranch(child.sourceBranch)) next.push(child.sourceBranch);
+      }
+    }
+    level = next;
+  }
+  return found;
+}
+
+/**
+ * The chain candidates in `gh pr list --json …,isCrossRepository` output;
+ * `undefined` when the output is not a list of PRs.
+ */
+export function githubStackCandidates(
+  value: unknown,
+): StackCandidate<GithubPrListItem>[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  try {
+    return (value as GithubPrListItem[]).map((item) => {
+      const state = item.state.toUpperCase();
+      return {
+        number: item.number,
+        url: item.url,
+        sourceBranch: item.headRefName,
+        targetBranch: item.baseRefName,
+        state: state === 'MERGED' ? 'merged' : state === 'CLOSED' ? 'closed' : 'open',
+        isFork: item.isCrossRepository === true,
+        item,
+      };
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The chain candidates in `glab api projects/:id/merge_requests?…` output;
+ * `undefined` when the output is not a list of merge requests. A `locked`
+ * MR counts as closed.
+ */
+export function gitlabStackCandidates(
+  value: unknown,
+): StackCandidate<GitlabMrListItem>[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  try {
+    return (value as GitlabMrListItem[]).map((item) => ({
+      number: item.iid,
+      url: item.web_url,
+      sourceBranch: item.source_branch,
+      targetBranch: item.target_branch,
+      state: item.state === 'opened' ? 'open' : item.state === 'merged' ? 'merged' : 'closed',
+      isFork:
+        item.source_project_id !== undefined &&
+        item.target_project_id !== undefined &&
+        item.source_project_id !== item.target_project_id,
+      item,
+    }));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Whether the group has no open PR left: every PR it holds is merged or
  * closed.
  */
 export const isFinished = (group: PrGroup) => !group.prs.some(isOpen);
+
+/**
+ * Sort rank of a group from its tracked PRs: by the urgency of its next
+ * action, so a group with no open tracked PR (`done`) sorts after every
+ * group with one, and a group of stack members only sorts after those.
+ */
+function rankOf(group: PrGroup): number {
+  const next = nextOf(group);
+  return next ? URGENCY[next.kind] : NO_NEXT_RANK;
+}
+
+/**
+ * Whether the band refreshes on the short interval: a tracked PR has CI
+ * running or is ready to merge. Stack members never count.
+ */
+export const needsFastRefresh = (prs: readonly Pr[]) =>
+  prs.some((m) => isTracked(m) && (m.state === 'running' || m.state === 'ready'));
 
 /**
  * Whether the band draws group headers: only when at least one group is a
@@ -795,7 +1043,8 @@ export type Announced = Record<string, PrState[]>;
  * A state already in `announced` for the PR is not announced again, so a
  * merge status that blips (ready, review, ready) toasts once; a change into
  * running, failing or draft forgets the PR's announced states first. `text`
- * is `undefined` when nothing is announced.
+ * is `undefined` when nothing is announced. Stack members (`stackOf` set)
+ * never toast, and a PR that was a member counts as newly tracked.
  */
 export function changesOf(
   previous: Pr[],
@@ -804,7 +1053,8 @@ export function changesOf(
 ): { text?: string; announced: Announced } {
   const record: Announced = { ...announced };
   const changes = next.flatMap((m) => {
-    const was = previous.find((p) => p.url === m.url);
+    if (m.stackOf) return [];
+    const was = previous.find((p) => p.url === m.url && !p.stackOf);
     if (!was || was.state === m.state) return [];
     if (NEW_CYCLE_STATES.includes(m.state)) delete record[m.url];
     const said = record[m.url] ?? [];
@@ -820,9 +1070,9 @@ export function changesOf(
  * Markdown list of every PR in the snapshot in band order: when the band
  * has headers, a `**<id>**` line per group (then its title, when set), then
  * one bullet per PR with its state icon, linked ref, repo, full title and
- * state label, plus its CI, 👍 approvals and note when set. Without headers,
- * the bullets alone. The first line ends with the snapshot age; fetch errors
- * follow the groups.
+ * state label, plus its CI, 👍 approvals and note when set, and `in stack`
+ * for a stack member. Without headers, the bullets alone. The first line
+ * ends with the snapshot age; fetch errors follow the groups.
  */
 export function listText(snap: Snapshot, now: number): string {
   const headed = hasHeaders(snap.groups);
@@ -833,6 +1083,7 @@ export function listText(snap: Snapshot, now: number): string {
       if (m.ci) parts.push(CI_TEXT[m.ci]);
       if (m.approvals !== undefined) parts.push(`👍 ${m.approvals}`);
       if (m.note) parts.push(m.note);
+      if (m.stackOf) parts.push(STACK_MEMBER_MARK);
       return `- ${parts.join(' · ')}`;
     });
     if (!headed) return rows.join('\n');
@@ -849,20 +1100,31 @@ export function listText(snap: Snapshot, now: number): string {
 /**
  * Groups PRs for the band by ticket key, else by a shared source branch,
  * else into `other` (see `groupKeysOf`). Each group keeps every PR, open,
- * merged or closed, in `stackOrder`. `other` always sorts last; before it, a
- * finished group (no open PR) sorts after every group with open PRs, and
- * open groups sort by the urgency of their next action, then by id. A
+ * merged or closed, in `stackOrder`. `other` always sorts last; before it,
+ * groups sort by `rankOf` (tracked PRs only): open groups by the urgency of
+ * their next action, then groups with no open tracked PR, then groups of
+ * stack members only; ties by id. A
  * ticket group takes its header title from `titles`; no other group has
  * one. `previous` holds the PRs of the previous snapshot, for the stack
- * bases it carries over.
+ * bases it carries over. A stack member (`stackOf` set) goes to its ticket
+ * group, else to the group of the tracked PR whose chain found it; members
+ * never count toward a shared-branch group.
  */
 export function buildGroups(
   prs: Pr[],
   titles: Record<string, string> = {},
   previous: Pr[] = [],
 ): PrGroup[] {
-  const keys = groupKeysOf(prs);
-  const keyOf = (m: Pr): GroupKey => keys.get(m) ?? { kind: 'other', id: OTHER };
+  const tracked = prs.filter((m) => !m.stackOf);
+  const keys = groupKeysOf(tracked);
+  const trackedByUrl = new Map(tracked.map((m) => [m.url, m]));
+  const memberKeyOf = (m: Pr): GroupKey | undefined => {
+    if (m.ticket) return { kind: 'ticket', id: m.ticket };
+    const finder = m.stackOf ? trackedByUrl.get(m.stackOf) : undefined;
+    return finder ? keys.get(finder) : undefined;
+  };
+  const keyOf = (m: Pr): GroupKey =>
+    keys.get(m) ?? memberKeyOf(m) ?? { kind: 'other', id: OTHER };
   const nameOf = (m: Pr) => `${keyOf(m).kind}:${keyOf(m).id}`;
 
   const byGroup = new Map<string, { key: GroupKey; prs: Pr[] }>();
@@ -881,8 +1143,7 @@ export function buildGroups(
   return groups.sort(
     (a, b) =>
       Number(a.kind === 'other') - Number(b.kind === 'other') ||
-      Number(isFinished(a)) - Number(isFinished(b)) ||
-      URGENCY[nextOf(a).kind] - URGENCY[nextOf(b).kind] ||
+      rankOf(a) - rankOf(b) ||
       a.id.localeCompare(b.id),
   );
 }
