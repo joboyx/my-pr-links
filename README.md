@@ -131,7 +131,7 @@ On each fetch, the band also follows the branch chain of every session PR, in th
 
 - Parents: while the target branch is not `main`, `master`, `develop`, `dev`, `trunk`, `staging` or `production`, the PR whose source branch is that target. An open PR wins over a merged one, then the newest. A closed PR never counts.
 - Children: the open PRs that target the PR's source branch, then theirs in turn. A PR whose source branch is one of the branches above lists no children.
-- The search stops at a branch it already saw, after 10 links in each direction, and at 20 PRs per session PR. PRs from a fork never count.
+- The search stops at a branch it already saw, after 10 links in each direction, and at 20 members per session PR. Another session PR in the chain does not count. PRs from a fork never count.
 
 A PR found this way and not touched by the session is a stack member. Its row has a dim ref and title and the mark `in stack` (`⧗ after #301 · in stack` when it is also stacked); `list` adds `in stack` too. A member joins the group of its ticket key, else the group of the session PR that found it, and takes its place in the stack order. Members are there to show the chain: a member row shows its own state and CI, but the group header's next action, the group order and the 1-minute refresh use session PRs only. A session PR stacked on an open member still shows `⧗ after <ref>`. Members never toast, and `refresh` does not count them. When one lookup call fails, that session PR shows no members on that fetch, with no error line.
 

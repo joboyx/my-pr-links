@@ -24,6 +24,7 @@ import {
   isReadyUnapproved,
   listText,
   LOOK,
+  memoLookup,
   needsFastRefresh,
   nextOf,
   outcomeOf,
@@ -38,6 +39,7 @@ import type {
   GitlabMrApprovals,
   GitlabMrItem,
   GitlabMrListItem,
+  LookupMemo,
   Pr,
   PrGroup,
   PrLink,
@@ -369,46 +371,76 @@ function gitlabLookup($: EngineInterface, link: PrLink): StackLookup<GitlabMrLis
 }
 
 /**
- * The untracked PRs in the branch chain of one tracked PR (see
- * `stackMembersOf`), as rows marked with `stackOf`. A GitHub member's row
- * comes from the list output; a GitLab member is fetched like a tracked MR,
- * for its pipeline and approvals. PRs in `known` (tracked) are left out.
- * Any failed call gives no members for this PR and no error line.
+ * The chain lookups of one fetch, shared by every tracked PR (see
+ * `memoLookup`), one memo per provider.
  */
-async function membersOf(
+type LookupMemos = {
+  github: LookupMemo<GithubPrListItem>;
+  gitlab: LookupMemo<GitlabMrListItem>;
+};
+
+/**
+ * What the chain search of one tracked PR found: GitHub member rows (from
+ * the list output), GitLab member URLs (fetched afterwards), or `undefined`
+ * when a call failed.
+ */
+type Chain = { pr: Pr; rows?: Pr[]; gitlabUrls?: string[] };
+
+/**
+ * Walks the branch chain of one tracked PR (see `stackMembersOf`) through
+ * the fetch's shared lookups. Tracked PRs (`isKnown`) carry the chain on but
+ * are never members.
+ */
+async function chainOf(
   $: EngineInterface,
   pr: Pr,
   auth: GithubAuth,
-  known: ReadonlySet<string>,
-): Promise<Pr[]> {
+  memos: LookupMemos,
+  isKnown: (url: string) => boolean,
+): Promise<Chain> {
   const link = parsePrUrl(pr.url);
-  if (!link) return [];
-  const mark = (m: Pr): Pr => ({ ...m, stackOf: pr.url });
-
+  if (!link) return { pr, rows: [] };
+  const repo = `${link.host}/${link.projectPath}`;
   if (link.provider === 'github') {
-    const found = await stackMembersOf(pr, githubLookup($, link, auth));
+    const lookup = memoLookup(memos.github, repo, githubLookup($, link, auth));
+    const found = await stackMembersOf(pr, lookup, isKnown);
     try {
-      return (found ?? []).filter((c) => !known.has(c.url)).map((c) => mark(fromGithub(c.item)));
+      return { pr, rows: found?.map((c) => fromGithub(c.item)) };
     } catch {
-      return [];
+      return { pr };
     }
   }
-
-  const found = await stackMembersOf(pr, gitlabLookup($, link));
-  const fresh = (found ?? []).filter((c) => !known.has(c.url));
-  const links = fresh.flatMap((c) => {
-    const parsed = parsePrUrl(c.url);
-    return parsed ? [parsed] : [];
-  });
-  if (links.length !== fresh.length) return [];
-  const results = await Promise.all(links.map((l) => fetchGitlab($, l)));
-  const rows = results.flatMap((r) => (r.pr ? [mark(r.pr)] : []));
-  return rows.length === results.length ? rows : [];
+  const lookup = memoLookup(memos.gitlab, repo, gitlabLookup($, link));
+  const found = await stackMembersOf(pr, lookup, isKnown);
+  return { pr, gitlabUrls: found?.map((c) => c.url) };
 }
 
 /**
- * The stack members of every tracked PR, each once: a member two tracked PRs
- * share keeps the first finder; a tracked PR is never a member.
+ * Fetches each GitLab member once, like a tracked MR (for its pipeline and
+ * approvals), by URL; a member whose fetch fails is missing from the map.
+ */
+async function fetchGitlabMembers($: EngineInterface, urls: string[]): Promise<Map<string, Pr>> {
+  const unique = [...new Set(urls)];
+  const results = await Promise.all(
+    unique.map(async (url) => {
+      const link = parsePrUrl(url);
+      return link ? (await fetchGitlab($, link)).pr : undefined;
+    }),
+  );
+  const byUrl = new Map<string, Pr>();
+  unique.forEach((url, i) => {
+    const pr = results[i];
+    if (pr) byUrl.set(url, pr);
+  });
+  return byUrl;
+}
+
+/**
+ * The stack members of every tracked PR, each once, as rows marked with
+ * `stackOf`: a member two tracked PRs share keeps the first finder; a
+ * tracked PR is never a member. Each chain lookup runs once per fetch, and
+ * each GitLab member is fetched once. Any failed call gives that tracked PR
+ * no members and no error line.
  */
 async function stackMembers(
   $: EngineInterface,
@@ -417,9 +449,18 @@ async function stackMembers(
   auth: GithubAuth,
 ): Promise<Pr[]> {
   const known = new Set([...urls, ...tracked.map((m) => m.url)]);
-  const found = await Promise.all(tracked.map((pr) => membersOf($, pr, auth, known)));
+  const memos: LookupMemos = { github: new Map(), gitlab: new Map() };
+  const chains = await Promise.all(
+    tracked.map((pr) => chainOf($, pr, auth, memos, (url) => known.has(url))),
+  );
+  const fetched = await fetchGitlabMembers($, chains.flatMap((c) => c.gitlabUrls ?? []));
+
   const byUrl = new Map<string, Pr>();
-  for (const m of found.flat()) if (!byUrl.has(m.url)) byUrl.set(m.url, m);
+  for (const chain of chains) {
+    const gitlab = chain.gitlabUrls?.map((url) => fetched.get(url));
+    const rows = chain.rows ?? (gitlab?.every(Boolean) ? (gitlab as Pr[]) : []);
+    for (const m of rows) if (!byUrl.has(m.url)) byUrl.set(m.url, { ...m, stackOf: chain.pr.url });
+  }
   return [...byUrl.values()];
 }
 

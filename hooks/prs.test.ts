@@ -29,8 +29,8 @@ import {
   isReadyUnapproved,
   listText,
   LOOK,
-  MAX_STACK_DEPTH,
   MAX_STACK_MEMBERS,
+  memoLookup,
   needsFastRefresh,
   nextOf,
   outcomeOf,
@@ -47,6 +47,7 @@ import type {
   GithubCheck,
   GithubPrView,
   GitlabMrItem,
+  LookupMemo,
   Pr,
   PrGroup,
   StackCandidate,
@@ -1419,7 +1420,38 @@ test('stack: one tracked PR keeps at most 20 members, parents first', async () =
   expect(found).toHaveLength(MAX_STACK_MEMBERS);
   expect(numbers(found)?.slice(0, 6)).toEqual([100, 101, 102, 103, 104, 200]);
   expect(numbers(found)?.at(-1)).toBe(214);
-  expect(MAX_STACK_DEPTH).toBe(10);
+});
+
+test('stack: a tracked PR carries the chain on but is neither kept nor counted', async () => {
+  // The parent #2 is tracked; its own parent #1 is a member.
+  const { lookup } = lookupOver([cand(1, 'a', 'main'), cand(2, 'b', 'a')]);
+  const isKnown = (url: string) => url.endsWith('/2');
+  expect(numbers(await stackMembersOf(root(3, 'c', 'b'), lookup, isKnown))).toEqual([1]);
+
+  // 30 children, the first 10 tracked: the cap counts the 20 members only.
+  const children = Array.from({ length: 30 }, (_, i) => cand(200 + i, `c${i}`, 'r'));
+  const tracked = new Set(children.slice(0, 10).map((c) => c.url));
+  const found = await stackMembersOf(root(1, 'r', 'main'), lookupOver(children).lookup, (url) =>
+    tracked.has(url),
+  );
+  expect(numbers(found)).toEqual(children.slice(10).map((c) => c.number));
+});
+
+test('memoLookup runs each query once per memo and repo, also while it runs', async () => {
+  const { lookup, queries } = lookupOver([cand(1, 'a', 'main')]);
+  const memo: LookupMemo<null> = new Map();
+  const web = memoLookup(memo, 'github.com/acme/web', lookup);
+  const docs = memoLookup(memo, 'github.com/octo-org/docs', lookup);
+
+  const [first, again] = await Promise.all([
+    web({ by: 'source', branch: 'a' }),
+    web({ by: 'source', branch: 'a' }),
+  ]);
+  await web({ by: 'target', branch: 'a' });
+  await docs({ by: 'source', branch: 'a' });
+
+  expect(again).toBe(first);
+  expect(queries).toEqual(['source a', 'target a', 'source a']);
 });
 
 test('stack: any failed lookup gives no members at all', async () => {

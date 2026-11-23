@@ -54,6 +54,7 @@ Groups show first. Keyless PRs go under a bare `other` header when a group exist
 - `stackMembersOf` in `hooks/prs.ts` walks the chain (same repo, both ways) through an injected lookup; `register.tsx` supplies the `gh pr list` / `glab api` lookups. The default branches of rule 5 never link a chain. Forks never count.
 - A member carries `stackOf` (the URL of the tracked PR that found it). It is derived on each fetch, never added to `created`, never toasted, and never counted toward rule 5.
 - Members are for visibility only: `nextOf` (header next action, "you …" text), the group rank and `needsFastRefresh` read tracked PRs only. A group of members only (a member with its own ticket key) has no next action and sorts after the groups with tracked work. The fold-past-12 count includes members.
+- Each lookup runs once per fetch for all tracked PRs (`memoLookup`), and each GitLab member is fetched once. A tracked PR in a chain carries the walk on but is not returned or counted toward the 20-member cap.
 - Any failed lookup gives that tracked PR no members on that fetch, with no error line, like a failed approvals call.
 
 ## Title command contract

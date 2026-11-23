@@ -838,6 +838,28 @@ export type StackLookup<T> = (query: {
 }) => Promise<StackCandidate<T>[] | undefined>;
 
 /**
+ * The chain lookups one fetch already started, by `<repo> <by> <branch>`.
+ */
+export type LookupMemo<T> = Map<string, Promise<StackCandidate<T>[] | undefined>>;
+
+/**
+ * Wraps the lookup of one repo so each query runs once per `memo`: the
+ * chains of several tracked PRs in one stack share the calls, also while
+ * they run. `repo` names the repo, such as `github.com/acme/web`.
+ */
+export function memoLookup<T>(memo: LookupMemo<T>, repo: string, lookup: StackLookup<T>): StackLookup<T> {
+  return (query) => {
+    const key = `${repo} ${query.by} ${query.branch}`;
+    let found = memo.get(key);
+    if (!found) {
+      found = lookup(query);
+      memo.set(key, found);
+    }
+    return found;
+  };
+}
+
+/**
  * The parent among `candidates` for a PR whose target is `branch`: a PR of
  * the same repo (no fork) whose source branch is `branch`, open before
  * merged (a closed PR never counts), then the newest; never `selfUrl`.
@@ -871,16 +893,22 @@ function childrenOf<T>(candidates: StackCandidate<T>[], branch: string): StackCa
  * branch, and theirs in turn, while that source is a work branch. A branch
  * already seen ends that path, so a cycle stops. Each direction follows at
  * most `MAX_STACK_DEPTH` links, and the search keeps at most
- * `MAX_STACK_MEMBERS` PRs. Forks never count. Resolves `undefined` when any
- * lookup failed, so a partial chain never shows.
+ * `MAX_STACK_MEMBERS` PRs. Forks never count. A PR that `isKnown` names (a
+ * tracked PR) carries the chain on but is neither kept nor counted.
+ * Resolves `undefined` when any lookup failed, so a partial chain never
+ * shows.
  */
 export async function stackMembersOf<T>(
   root: Pick<Pr, 'url' | 'sourceBranch' | 'targetBranch'>,
   lookup: StackLookup<T>,
+  isKnown: (url: string) => boolean = () => false,
 ): Promise<StackCandidate<T>[] | undefined> {
   const seen = new Set([root.sourceBranch]);
   const found: StackCandidate<T>[] = [];
   const isFull = () => found.length >= MAX_STACK_MEMBERS;
+  const keep = (c: StackCandidate<T>) => {
+    if (!isKnown(c.url)) found.push(c);
+  };
 
   let target = root.targetBranch;
   for (let depth = 0; depth < MAX_STACK_DEPTH && !isFull(); depth++) {
@@ -890,7 +918,7 @@ export async function stackMembersOf<T>(
     const parent = parentOf(candidates, target, root.url);
     if (!parent) break;
     seen.add(target);
-    found.push(parent);
+    keep(parent);
     target = parent.targetBranch;
   }
 
@@ -905,7 +933,7 @@ export async function stackMembersOf<T>(
         if (isFull()) break;
         if (child.url === root.url || seen.has(child.sourceBranch)) continue;
         seen.add(child.sourceBranch);
-        found.push(child);
+        keep(child);
         if (isWorkBranch(child.sourceBranch)) next.push(child.sourceBranch);
       }
     }

@@ -1676,6 +1676,95 @@ test('a GitLab MR shows its untracked parent and child in its ticket group, fetc
   );
 });
 
+/**
+ * How often each argv among `ran` that `pick` selects ran, by its joined text.
+ */
+function timesOf(ran: string[][], pick: (argv: string[]) => boolean): Record<string, number> {
+  const times: Record<string, number> = {};
+  for (const argv of ran.filter(pick)) times[argv.join(' ')] = (times[argv.join(' ')] ?? 0) + 1;
+  return times;
+}
+
+test('two tracked GitHub PRs in one chain run each gh pr list once per fetch', async ($, on) => {
+  const { base, middle } = GITHUB_STACK;
+  const { ran, clock } = hostsFor(on, {
+    views: { [base.url]: base, [middle.url]: middle },
+    lists: githubStackLists(),
+  });
+  sessionFor(on, createdTranscript([base.url, middle.url]));
+
+  await $.session.start(START);
+  await clock.settle();
+
+  const lists = timesOf(ran, (argv) => argv[0] === 'gh' && argv[2] === 'list');
+  expect(Object.keys(lists).map((argv) => argv.split(' ').slice(5, 7).join(' '))).toEqual(
+    expect.arrayContaining([
+      '--base octo-user/cart-api',
+      '--head octo-user/cart-api',
+      '--base octo-user/cart-ui',
+      '--base octo-user/cart-tests',
+    ]),
+  );
+  expect(Object.keys(lists)).toHaveLength(4);
+  expect(Object.values(lists).every((n) => n === 1)).toBe(true);
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await marksOf(ui)).toEqual(['301 -', '302 ⧗ after #301', '303 ⧗ after #302 · in stack']);
+});
+
+test('two tracked GitLab MRs in one chain run each lookup and member fetch once per fetch', async ($, on) => {
+  const onBackoff = { ...GITLAB_MR_42, source_project_id: 1001, target_project_id: 1001 };
+  const { ran, clock } = hostsFor(on, {
+    lists: {
+      ...GITLAB_STACK_LISTS,
+      [`${SHOP_API}?source_branch=feature%2FSHOP-214-backoff&state=all`]: [onBackoff],
+    },
+    mrs: [GITLAB_MR_43],
+  });
+  sessionFor(on, createdTranscript([PR_42, GITLAB_MR_43.web_url]));
+
+  await $.session.start(START);
+  await clock.settle();
+
+  const calls = timesOf(
+    ran,
+    (argv) => {
+      const path = argv[2] ?? '';
+      return argv[0] === 'glab' && (path.includes('?') || path.startsWith(`${SHOP_API}/41`));
+    },
+  );
+  expect(calls).toEqual({
+    [`glab api ${SHOP_API}?source_branch=feature%2FSHOP-214-checkout-retry&state=all`]: 1,
+    [`glab api ${SHOP_API}?source_branch=feature%2FSHOP-214-backoff&state=all`]: 1,
+    [`glab api ${SHOP_API}?target_branch=feature%2FSHOP-214-backoff&state=opened`]: 1,
+    [`glab api ${SHOP_API}?target_branch=feature%2FSHOP-214-jitter&state=opened`]: 1,
+    [`glab api ${SHOP_API}/41`]: 1,
+    [`glab api ${SHOP_API}/41/approvals`]: 1,
+  });
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await marksOf(ui)).toEqual(['41 in stack', '42 ⧗ after !41', '43 ⧗ after !42']);
+});
+
+test('a failed GitLab chain lookup adds no member and no error line; the tracked row stays', async ($, on) => {
+  const { [`${SHOP_API}?target_branch=feature%2FSHOP-214-jitter&state=opened`]: _gone, ...lists } =
+    GITLAB_STACK_LISTS;
+  const { ran, clock } = hostsFor(on, { lists, mrs: [GITLAB_MR_43] });
+  toolsFor(on);
+
+  await createShopApiPr($);
+  await clock.settle();
+
+  // The parent lookup worked, the last child lookup failed: no partial chain shows, nothing is fetched.
+  expect(ran).toContainEqual([
+    'glab',
+    'api',
+    `${SHOP_API}?source_branch=feature%2FSHOP-214-checkout-retry&state=all`,
+  ]);
+  expect(ran.some((argv) => argv[2] === `${SHOP_API}/41` || argv[2] === `${SHOP_API}/43`)).toBe(false);
+  const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
+  expect(await marksOf(ui)).toEqual(['42 -']);
+  expect(await ui.find({ text: /⚠/ })).toBeUndefined();
+});
+
 test('a GitLab member that cannot be fetched adds no member', async ($, on) => {
   // No answer for !43: its own fetch fails.
   const { clock } = hostsFor(on, { lists: GITLAB_STACK_LISTS });
