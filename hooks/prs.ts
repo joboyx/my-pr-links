@@ -524,7 +524,7 @@ function gitlabApprovals(approvals: GitlabMrApprovals | undefined): string | und
  * has no rule; `undefined` when `gitlabApprovals` gives no count.
  */
 function gitlabIsApproved(approvals: GitlabMrApprovals | undefined): boolean | undefined {
-  if (gitlabApprovals(approvals) === undefined || !approvals) return undefined;
+  if (!approvals || gitlabApprovals(approvals) === undefined) return undefined;
   if (approvals.approvals_required > 0) return approvals.approvals_left === 0;
   return (approvals.approved_by?.length ?? 0) > 0;
 }
@@ -699,7 +699,7 @@ function githubApprovals(view: GithubPrView): string {
 /**
  * Whether the PR is ready to merge although nobody approved it: its given
  * approval count is `0`. A GitLab MR with a rule is never ready unapproved.
- * The band shows its 👍 cell in the warning color, such as for a repo whose
+ * The band shows its approvals cell in the warning color, such as for a repo whose
  * target branch is not protected.
  */
 export function isReadyUnapproved(m: Pr): boolean {
