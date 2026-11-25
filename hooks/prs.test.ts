@@ -16,6 +16,7 @@ import {
   SESSION_CREATE_CALLS,
 } from './fixtures';
 import {
+  approvalsText,
   browserArgv,
   buildGroups,
   changesOf,
@@ -1040,6 +1041,33 @@ test('a GitLab MR without an approval rule shows the given count', () => {
   expect(fromGitlab(GITLAB_MR_41).approvals).toBeUndefined();
 });
 
+test('the approvals cell shows 👍 only when the GitLab MR has the approvals it needs', () => {
+  expect(approvalsText(gitlab(GITLAB_MR_41))).toBe('👍 1/1');
+  expect(approvalsText(gitlab(GITLAB_MR_41, { approvals_required: 1, approvals_left: 1 }))).toBe(
+    '⏳ 0/1',
+  );
+  expect(approvalsText(gitlab(GITLAB_MR_41, { approvals_required: 2, approvals_left: 1 }))).toBe(
+    '⏳ 1/2',
+  );
+  expect(approvalsText(gitlab(GITLAB_MR_41, GITLAB_NO_RULE_APPROVALS))).toBe('👍 1');
+  const none = gitlab(GITLAB_MR_41, { ...GITLAB_NO_RULE_APPROVALS, approved_by: [] });
+  expect(approvalsText(none)).toBe('⏳ 0');
+  expect(approvalsText(fromGitlab(GITLAB_MR_41))).toBeUndefined();
+});
+
+test('the approvals cell shows 👍 only when the GitHub PR has the reviews it needs', () => {
+  const one = [{ author: { login: 'reviewer-ana' }, state: 'APPROVED' }];
+  const cellOf = (over: Partial<GithubPrView>) => approvalsText(fromGithub(githubView(over)));
+
+  expect(cellOf({ reviewDecision: 'APPROVED', latestReviews: one })).toBe('👍 1');
+  expect(cellOf({ reviewDecision: 'REVIEW_REQUIRED', latestReviews: one })).toBe('⏳ 1');
+  expect(cellOf({ reviewDecision: 'CHANGES_REQUESTED', latestReviews: GITHUB_LATEST_REVIEWS })).toBe(
+    '⏳ 2',
+  );
+  expect(cellOf({ reviewDecision: '', latestReviews: one })).toBe('👍 1');
+  expect(cellOf({ reviewDecision: '', latestReviews: [] })).toBe('⏳ 0');
+});
+
 test('every unfinished or failed status maps to running or failing', () => {
   const ciOf = (check: GithubCheck) => fromGithub(githubView({ statusCheckRollup: [check] })).ci;
 
@@ -1234,7 +1262,7 @@ test('listText puts keyless PRs under a bare other header when a group exists', 
       `- ◉ [!41](${GITLAB_MR_41.web_url}) shop-api — feat(SHOP-214): add retry to the checkout client · ready to merge · CI ✓ · 👍 1/1`,
       '',
       '**other**',
-      `- ◌ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · draft · 👍 0`,
+      `- ◌ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · draft · ⏳ 0`,
     ].join('\n'),
   );
 });
@@ -1243,7 +1271,7 @@ test('listText of a band with no group is a plain list with no header', () => {
   const groups = buildGroups([fromGithub(GITHUB_88_VIEW)]);
 
   expect(listText({ fetchedAt: FETCHED_AT, groups, errors: [] }, FETCHED_AT)).toBe(
-    `- ◌ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · draft · 👍 0 · fetched just now`,
+    `- ◌ [#88](${PR_88}) docs — chore(ci): add a docs build workflow · draft · ⏳ 0 · fetched just now`,
   );
 });
 
@@ -1580,7 +1608,7 @@ test('listText marks a member in stack', () => {
   const [group] = buildGroups([tracked, parent]);
 
   expect(listText({ fetchedAt: FETCHED_AT, groups: [group!], errors: [] }, FETCHED_AT)).toContain(
-    `- ○ [#80](https://github.com/octo-org/docs/pull/80) docs — chore: tidy · in review · 👍 0 · in stack`,
+    `- ○ [#80](https://github.com/octo-org/docs/pull/80) docs — chore: tidy · in review · ⏳ 0 · in stack`,
   );
 });
 

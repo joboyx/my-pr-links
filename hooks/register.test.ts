@@ -349,7 +349,7 @@ test('a main-loop glab mr create adds the PR and the band shows it after the fet
     const ui = await $.ui.mount({ plugin: 'my-pr-links', surface, ...BAND });
 
     expect((await ui.findAll({ type: 'Text', text: /just now/ })).length).toBe(1);
-    expect(await ui.find({ text: /👍 0\/1/ })).toBeDefined();
+    expect(await ui.find({ text: /⏳ 0\/1/ })).toBeDefined();
     expect(await ui.find({ type: 'Text', text: 'SHOP-214' })).toBeDefined();
     expect(await ui.find({ type: 'Text', text: 'back off between checkout retries' })).toBeDefined();
     expect(await ui.find({ text: /review !42/ })).toBeDefined();
@@ -716,7 +716,7 @@ test('a stacked row keeps the title and state widths of the other rows, grouped 
   expect(note?.props).toMatchObject({ width: 0, flexGrow: 1 });
 });
 
-test('a ready GitHub PR nobody approved shows 👍 0 in the warning color', async ($, on) => {
+test('a ready GitHub PR nobody approved shows ⏳ 0 in the warning color', async ($, on) => {
   const ready = { ...GITHUB_88_VIEW, isDraft: false, mergeStateStatus: 'CLEAN' };
   const { ran, clock } = hostsFor(on, { gh: ok({ ...ready, latestReviews: [] }) });
   toolsFor(on);
@@ -728,7 +728,7 @@ test('a ready GitHub PR nobody approved shows 👍 0 in the warning color', asyn
   expect(view?.[5]?.split(',')).toContain('latestReviews');
   expect(view?.[5]?.split(',')).toContain('body');
   const ui = await $.ui.mount({ plugin: 'my-pr-links', surface: 'terminal', ...BAND });
-  const cell = await ui.find({ type: 'Text', text: '👍 0' });
+  const cell = await ui.find({ type: 'Text', text: '⏳ 0' });
   expect(cell?.props).toMatchObject({ color: 'warning' });
   expect(cell?.props.dimColor).toBeUndefined();
 });
@@ -1516,7 +1516,7 @@ test('/my-pr-links list prints the snapshot, even with the band hidden', async (
   expect(out.text).toBe(
     [
       '**SHOP-214** · fetched 5m ago',
-      `- ○ [!42](${PR_42}) shop-api — feat(SHOP-214): back off between checkout retries · in review · 👍 0/1 · unresolved threads`,
+      `- ○ [!42](${PR_42}) shop-api — feat(SHOP-214): back off between checkout retries · in review · ⏳ 0/1 · unresolved threads`,
     ].join('\n'),
   );
   expect(ran.filter((argv) => argv[2] === `${SHOP_API}/42`)).toHaveLength(fetches);
@@ -1598,9 +1598,9 @@ test('a GitHub PR shows its untracked parent and child in chain order, marked in
   expect((await run('refresh')).text).toBe('1 PRs from this session');
   const list = (await run('list')).text ?? '';
   expect(list).toContain(
-    '- ◉ [#301](https://github.com/acme/web/pull/301) web — add the cart API · ready to merge · 👍 0 · in stack',
+    '- ◉ [#301](https://github.com/acme/web/pull/301) web — add the cart API · ready to merge · ⏳ 0 · in stack',
   );
-  expect(list).toContain('- ○ [#302](https://github.com/acme/web/pull/302) web — add the cart page · in review · 👍 0\n');
+  expect(list).toContain('- ○ [#302](https://github.com/acme/web/pull/302) web — add the cart page · in review · ⏳ 0\n');
   expect(list).not.toMatch(/#304/);
 });
 

@@ -9,6 +9,7 @@ import type {
 
 import {
   ageOf,
+  approvalsText,
   browserArgv,
   buildGroups,
   changesOf,
@@ -86,7 +87,7 @@ const GITHUB_LIST_FIELDS = `${GITHUB_VIEW_FIELDS},isCrossRepository`;
 
 const isHidden = atom({ plugin: 'my-pr-links', key: 'isHidden' } as const, false);
 const snapshot = atom({ plugin: 'my-pr-links', key: 'snapshot' } as const, null, {
-  shape: 'prs-5',
+  shape: 'prs-6',
 });
 const created = atom({ plugin: 'my-pr-links', key: 'created' } as const, []);
 
@@ -988,9 +989,9 @@ export const register: Register = (on, options) => {
           {approvalsWidth > 0 && (
             <Box width={approvalsWidth} flexShrink={0}>
               {isReadyUnapproved(m) ? (
-                <Text color="warning">{`👍 ${m.approvals}`}</Text>
+                <Text color="warning">{approvalsText(m)}</Text>
               ) : (
-                <Text dimColor>{m.approvals ? `👍 ${m.approvals}` : ''}</Text>
+                <Text dimColor>{approvalsText(m) ?? ''}</Text>
               )}
             </Box>
           )}

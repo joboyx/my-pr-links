@@ -14,7 +14,7 @@
 - **GitHub and GitLab.** GitHub PRs come through `gh`, GitLab merge requests through `glab`.
 - **Groups.** PRs group by ticket key (from the branch, the title or the description) or by a shared source branch. An optional title command puts a title next to each key.
 - **Next action.** Each group header says what to do next: `fix CI #23859`, `you merge #23885`, `undraft #23870`, `review #14727`. Groups that need you sort first.
-- **State, CI and approvals** on every row. `/my-pr-links list` prints the full titles.
+- **State, CI and approvals** on every row. The approvals cell shows 👍 once the PR has the approvals it needs, and ⏳ while it still waits for one. `/my-pr-links list` prints the full titles.
 - **Click to open.** Click a ref to open the PR, or the CI cell to open the pipeline (GitLab) or check (GitHub) page.
 - **Change toasts.** A toast says when a PR merges, closes, fails CI or becomes ready to merge.
 - **Folding.** Past 12 PRs, finished groups shrink to their header line.
