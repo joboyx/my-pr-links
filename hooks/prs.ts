@@ -56,6 +56,13 @@ export type Pr = {
    */
   approvals?: string;
   /**
+   * Whether the PR has the approvals it needs: a GitLab MR with a rule has
+   * none left, a GitHub PR has the review decision `APPROVED`. With no rule
+   * or required review, one approval is enough. Undefined when `approvals`
+   * is undefined.
+   */
+  isApproved?: boolean;
+  /**
    * Ticket key such as `SHOP-214`, from the source branch, the title or the
    * description; see `ticketOf`.
    */
@@ -513,6 +520,16 @@ function gitlabApprovals(approvals: GitlabMrApprovals | undefined): string | und
 }
 
 /**
+ * Whether the MR has the approvals its rule needs, or one approval when it
+ * has no rule; `undefined` when `gitlabApprovals` gives no count.
+ */
+function gitlabIsApproved(approvals: GitlabMrApprovals | undefined): boolean | undefined {
+  if (gitlabApprovals(approvals) === undefined || !approvals) return undefined;
+  if (approvals.approvals_required > 0) return approvals.approvals_left === 0;
+  return (approvals.approved_by?.length ?? 0) > 0;
+}
+
+/**
  * Maps one GitLab MR, with its head pipeline, plus its approvals when
  * fetched, to a `Pr`.
  */
@@ -555,6 +572,7 @@ export function fromGitlab(item: GitlabMrItem, approvals?: GitlabMrApprovals): P
     ci,
     ciUrl: item.head_pipeline?.web_url || undefined,
     approvals: gitlabApprovals(approvals),
+    isApproved: gitlabIsApproved(approvals),
     ticket,
     note: notes.length > 0 ? notes.join(', ') : undefined,
   };
@@ -651,8 +669,20 @@ export function fromGithub(view: GithubPrView): Pr {
     ci,
     ciUrl: githubCiUrl(view.statusCheckRollup),
     approvals: githubApprovals(view),
+    isApproved: githubIsApproved(view),
     ticket,
   };
+}
+
+/**
+ * Whether the PR has the reviews it needs: the review decision is
+ * `APPROVED`, or the repo requires no review (empty decision) and one
+ * reviewer approves. `REVIEW_REQUIRED` and `CHANGES_REQUESTED` are not
+ * approved, whatever the count.
+ */
+function githubIsApproved(view: GithubPrView): boolean {
+  if (view.reviewDecision === 'APPROVED') return true;
+  return !view.reviewDecision && githubApprovals(view) !== '0';
 }
 
 /**
@@ -674,6 +704,27 @@ function githubApprovals(view: GithubPrView): string {
  */
 export function isReadyUnapproved(m: Pr): boolean {
   return m.state === 'ready' && m.approvals === '0';
+}
+
+/**
+ * The mark before the approvals count: 👍 when the PR has the approvals it
+ * needs (`isApproved`).
+ */
+export const APPROVED_MARK = '👍';
+
+/**
+ * The mark before the approvals count when the PR still waits for an
+ * approval, so a count such as `0/1` never shows a 👍.
+ */
+export const UNAPPROVED_MARK = '⏳';
+
+/**
+ * The approvals cell, such as `👍 1/1` or `⏳ 0/1`; `undefined` when
+ * approvals were not fetched.
+ */
+export function approvalsText(m: Pr): string | undefined {
+  if (m.approvals === undefined) return undefined;
+  return `${m.isApproved ? APPROVED_MARK : UNAPPROVED_MARK} ${m.approvals}`;
 }
 
 /**
@@ -1109,7 +1160,8 @@ export function listText(snap: Snapshot, now: number): string {
       const look = LOOK[m.state];
       const parts = [`${look.icon} [${m.ref}](${m.url}) ${m.repo} — ${m.title}`, look.label];
       if (m.ci) parts.push(CI_TEXT[m.ci]);
-      if (m.approvals !== undefined) parts.push(`👍 ${m.approvals}`);
+      const approvals = approvalsText(m);
+      if (approvals) parts.push(approvals);
       if (m.note) parts.push(m.note);
       if (m.stackOf) parts.push(STACK_MEMBER_MARK);
       return `- ${parts.join(' · ')}`;
